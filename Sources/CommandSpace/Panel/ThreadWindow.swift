@@ -305,6 +305,9 @@ private struct ThreadTranscript: View {
                             if let offer = thread.learnOffer, offer.itemID == item.id {
                                 LearnOfferCard(offer: offer, thread: thread)
                             }
+                            if thread.planReadyItemID == item.id {
+                                PlanReadyCard(thread: thread)
+                            }
                         }
                         if thread.isBusy {
                             AgentActivityView(thread: thread).id("busy")
@@ -324,7 +327,7 @@ private struct ThreadTranscript: View {
                     thread.reply(to: permission, with: reply)
                 }
                 .frame(maxWidth: 760)
-                .frame(height: 150)
+                .frame(height: permission.plan == nil ? 150 : 340)
                 .padding(.horizontal, 32)
                 .padding(.bottom, 8)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -347,6 +350,7 @@ private struct ThreadTranscript: View {
                     .foregroundStyle(.gray)
             }
             Spacer()
+            AgentModeChip(thread: thread)
             if thread.isBusy {
                 Button("Stop") { thread.abort() }
                     .buttonStyle(.plain)

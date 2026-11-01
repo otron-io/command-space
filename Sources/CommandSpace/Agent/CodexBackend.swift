@@ -158,7 +158,19 @@ final class CodexBackend: AgentBackend {
         return id
     }
 
-    func send(_ text: String, context: String?, to session: String) async throws {
+    /// Approval policy and sandbox for a mode (applied per turn; Codex keeps them for later turns).
+    nonisolated static func policy(for mode: AgentMode) -> (approval: String, sandbox: [String: Any]) {
+        switch mode {
+        case .plan: return ("never", ["type": "readOnly"])
+        case .ask, .acceptEdits: return ("untrusted", ["type": "dangerFullAccess"])
+        case .auto: return ("on-request", ["type": "workspaceWrite", "networkAccess": false])
+        case .fullAccess: return ("never", ["type": "dangerFullAccess"])
+        }
+    }
+
+    func setMode(_ mode: AgentMode, for session: String) {}
+
+    func send(_ text: String, context: String?, mode: AgentMode, to session: String) async throws {
         try await ready()
         if !loaded.contains(session) {
             var params = threadSettings
@@ -167,8 +179,11 @@ final class CodexBackend: AgentBackend {
             _ = try await call("thread/resume", params)
             loaded.insert(session)
         }
-        let message = context.map { SpaceWorkspace.wrap(context: $0, around: text) } ?? text
-        var params: [String: Any] = ["threadId": session, "input": [["type": "text", "text": message]]]
+        let hidden = [mode == .plan ? SpaceWorkspace.planInstruction : nil, context].compactMap { $0 }
+        let message = hidden.isEmpty ? text : SpaceWorkspace.wrap(context: hidden.joined(separator: "\n\n"), around: text)
+        let policy = Self.policy(for: mode)
+        var params: [String: Any] = ["threadId": session, "input": [["type": "text", "text": message]],
+                                     "approvalPolicy": policy.approval, "sandboxPolicy": policy.sandbox]
         let model = Defaults[.codexModel]
         if !model.isEmpty { params["model"] = model }
         AgentBackendSink.event(harness, session, .busy(true))

@@ -112,6 +112,7 @@ struct CommandSpaceView: View {
                 if agent.isBusy {
                     barButton("stop.fill", help: "Stop") { agent.current.abort() }
                 }
+                AgentModeChip(thread: agent.current)
                 barButton("clock.arrow.circlepath", help: "All conversations (⌘Y)") { model.showConversations() }
                 if !agent.current.isEmpty {
                     barButton("macwindow", help: "Continue in a window (⌘O)") { model.openInWindow() }
@@ -231,7 +232,7 @@ struct CommandSpaceView: View {
             footerStatus
             Spacer(minLength: 8)
             if model.mode == .agent {
-                hint("⏎", "Send"); hint("⌘O", "Window"); hint("⌘Y", "History"); hint("esc", "Back")
+                hint("⏎", "Send"); hint("⇧⇥", "Mode"); hint("⌘O", "Window"); hint("⌘Y", "History"); hint("esc", "Back")
             } else if let selected = model.selectedResult {
                 hint("⏎", Self.verb(for: selected))
                 if selected.fileURL != nil { hint("⌘⏎", "Reveal") }

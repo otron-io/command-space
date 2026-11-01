@@ -86,9 +86,35 @@ final class ClaudeBackend: AgentBackend {
         return UUID().uuidString.lowercased()
     }
 
-    func send(_ text: String, context: String?, to session: String) async throws {
+    nonisolated static func permissionMode(_ mode: AgentMode) -> String {
+        switch mode {
+        case .plan: return "plan"
+        case .ask: return "default"
+        case .acceptEdits: return "acceptEdits"
+        case .auto: return "auto"
+        case .fullAccess: return "bypassPermissions"
+        }
+    }
+
+    nonisolated static func agentMode(_ permissionMode: String) -> AgentMode? {
+        switch permissionMode {
+        case "plan": return .plan
+        case "default", "manual": return .ask
+        case "acceptEdits": return .acceptEdits
+        case "auto", "dontAsk": return .auto
+        case "bypassPermissions": return .fullAccess
+        default: return nil
+        }
+    }
+
+    func setMode(_ mode: AgentMode, for session: String) {
+        live[session]?.setMode(mode)
+    }
+
+    func send(_ text: String, context: String?, mode: AgentMode, to session: String) async throws {
         try await ready()
-        let conversation = try process(for: session)
+        let conversation = try process(for: session, mode: mode)
+        if conversation.mode != mode { conversation.setMode(mode) }
         let message = context.map { SpaceWorkspace.wrap(context: $0, around: text) } ?? text
         AgentBackendSink.event(harness, session, .busy(true))
         conversation.send(message)
@@ -113,12 +139,12 @@ final class ClaudeBackend: AgentBackend {
         throw ClaudeError(message: "Claude Code is taking too long to start")
     }
 
-    private func process(for session: String) throws -> ClaudeSession {
+    private func process(for session: String, mode: AgentMode) throws -> ClaudeSession {
         if let existing = live[session], existing.isRunning { return existing }
         guard let binary else { throw ClaudeError(message: "Claude Code isn’t installed") }
         let resume = FileManager.default.fileExists(atPath: Self.file(for: session).path)
         let conversation = ClaudeSession(
-            id: session, binary: binary, resume: resume,
+            id: session, binary: binary, resume: resume, mode: mode,
             emit: { [weak self] event in
                 guard let self else { return }
                 AgentBackendSink.event(self.harness, session, event)
@@ -268,7 +294,8 @@ final class ClaudeBackend: AgentBackend {
                         let text = block["text"] as? String ?? ""
                         if !text.isEmpty { items.append(AgentItem(id: "\(uuid):\(n)", kind: .assistant, text: text)) }
                     case "tool_use":
-                        guard let id = block["id"] as? String else { continue }
+                        guard let id = block["id"] as? String,
+                              !ClaudeSession.hiddenTools.contains(block["name"] as? String ?? "") else { continue }
                         let name = block["name"] as? String ?? "tool"
                         toolIndex[id] = items.count
                         items.append(AgentItem(id: id, kind: .tool(name: ClaudeSession.toolName(name), status: "completed"),
@@ -296,6 +323,7 @@ final class ClaudeSession {
     private let exited: () -> Void
 
     private(set) var isBusy = false
+    private(set) var mode: AgentMode
     private var currentMessage = ""
     private var textIDs: [String: [String]] = [:]
     private var tools: [String: (name: String, summary: String)] = [:]
@@ -306,7 +334,7 @@ final class ClaudeSession {
     var isRunning: Bool { process.isRunning }
     var openPermissions: [AgentPermission] { requests.values.map(\.permission) }
 
-    init(id: String, binary: String, resume: Bool,
+    init(id: String, binary: String, resume: Bool, mode: AgentMode,
          emit: @escaping (AgentEvent) -> Void, reportModel: @escaping (String) -> Void,
          finished: @escaping () -> Void, exited: @escaping () -> Void) {
         self.id = id
@@ -314,9 +342,13 @@ final class ClaudeSession {
         self.reportModel = reportModel
         self.finished = finished
         self.exited = exited
+        self.mode = mode
         var arguments = [
             "-p", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose",
-            "--include-partial-messages", "--permission-prompt-tool", "stdio", "--permission-mode", "default",
+            "--include-partial-messages", "--permission-prompt-tool", "stdio",
+            "--permission-mode", ClaudeBackend.permissionMode(mode),
+            // Lets the conversation be switched to Full access later; it isn't used unless chosen.
+            "--allow-dangerously-skip-permissions",
             "--append-system-prompt", SpaceWorkspace.instructions,
         ]
         arguments += resume ? ["--resume", id] : ["--session-id", id]
@@ -345,6 +377,11 @@ final class ClaudeSession {
 
     func interrupt() { control(["subtype": "interrupt"]) }
 
+    func setMode(_ mode: AgentMode) {
+        self.mode = mode
+        control(["subtype": "set_permission_mode", "mode": ClaudeBackend.permissionMode(mode)])
+    }
+
     func terminate() {
         idleTask?.cancel()
         process.terminate()
@@ -353,6 +390,23 @@ final class ClaudeSession {
     func reply(to requestID: String, with reply: PermissionReply) {
         guard let request = requests.removeValue(forKey: requestID) else { return }
         var response: [String: Any]
+        if request.permission.plan != nil {
+            // Leaving plan mode: approve with the mode to carry on in, or keep planning.
+            switch reply {
+            case .reject:
+                response = ["behavior": "deny", "message": "The user wants to keep planning. Wait for their feedback on the plan."]
+            case .once, .always:
+                let next: AgentMode = reply == .always ? .acceptEdits : SystemTwoHarness.claudeCode.executionMode
+                mode = next
+                response = ["behavior": "allow", "updatedInput": request.input,
+                            "updatedPermissions": [["type": "setMode", "mode": ClaudeBackend.permissionMode(next),
+                                                    "destination": "session"]]]
+                emit(.mode(next))
+            }
+            process.send(["type": "control_response",
+                          "response": ["subtype": "success", "request_id": requestID, "response": response]])
+            return
+        }
         switch reply {
         case .once:
             response = ["behavior": "allow", "updatedInput": request.input]
@@ -388,6 +442,11 @@ final class ClaudeSession {
             case "status": if message["status"] as? String == "requesting" { emit(.step) }
             default: break
             }
+            // Claude Code reports its mode on init and whenever it changes.
+            if let raw = message["permissionMode"] as? String, let reported = ClaudeBackend.agentMode(raw), reported != mode {
+                mode = reported
+                emit(.mode(reported))
+            }
         case "stream_event":
             guard let event = message["event"] as? [String: Any] else { return }
             switch event["type"] as? String {
@@ -416,7 +475,7 @@ final class ClaudeSession {
                     textIDs[messageID] = queue
                     emit(.item(AgentItem(id: id, kind: .assistant, text: block["text"] as? String ?? "")))
                 case "tool_use":
-                    guard let id = block["id"] as? String else { continue }
+                    guard let id = block["id"] as? String, !Self.hiddenTools.contains(block["name"] as? String ?? "") else { continue }
                     let name = Self.toolName(block["name"] as? String ?? "tool")
                     let summary = Self.summary(of: block["input"] as? [String: Any] ?? [:])
                     tools[id] = (name, summary)
@@ -482,9 +541,14 @@ final class ClaudeSession {
         let input = request["input"] as? [String: Any] ?? [:]
         var pattern = Self.summary(of: input)
         if pattern.isEmpty { pattern = request["description"] as? String ?? tool }
-        let permission = AgentPermission(
+        var permission = AgentPermission(
             id: requestID, sessionID: id, permission: Self.toolName(tool), patterns: [pattern],
             callID: request["tool_use_id"] as? String)
+        if tool == "ExitPlanMode" {
+            permission.plan = input["plan"] as? String ?? ""
+            permission = AgentPermission(id: requestID, sessionID: id, permission: "plan", patterns: [],
+                                         callID: permission.callID, plan: permission.plan)
+        }
         requests[requestID] = (permission, input, request["permission_suggestions"] as? [[String: Any]] ?? [])
         emit(.permission(permission))
     }
@@ -513,9 +577,13 @@ final class ClaudeSession {
 
     // MARK: Formatting
 
+    /// Claude Code housekeeping that means nothing to the user.
+    nonisolated static let hiddenTools: Set<String> = ["ToolSearch", "TodoWrite", "TaskCreate", "TaskUpdate", "TaskList"]
+
     nonisolated static func toolName(_ name: String) -> String {
         switch name {
         case "Bash": return "bash"
+        case "ExitPlanMode": return "plan"
         case "Edit", "MultiEdit", "Write", "NotebookEdit": return "edit"
         case "Read": return "read"
         case "WebFetch": return "webfetch"

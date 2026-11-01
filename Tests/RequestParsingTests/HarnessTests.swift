@@ -65,4 +65,26 @@ final class HarnessTests: XCTestCase {
         XCTAssertEqual(items[2].kind, .assistant)
         XCTAssertEqual(items[2].text, "I couldn't read Downloads.")
     }
+
+    func testModeMappings() {
+        for mode in AgentMode.allCases {
+            XCTAssertEqual(ClaudeBackend.agentMode(ClaudeBackend.permissionMode(mode)), mode)
+        }
+        XCTAssertEqual(ClaudeBackend.agentMode("dontAsk"), .auto)
+        XCTAssertNil(ClaudeBackend.agentMode("something-new"))
+
+        XCTAssertEqual(CodexBackend.policy(for: .plan).approval, "never")
+        XCTAssertEqual(CodexBackend.policy(for: .plan).sandbox["type"] as? String, "readOnly")
+        XCTAssertEqual(CodexBackend.policy(for: .ask).approval, "untrusted")
+        XCTAssertEqual(CodexBackend.policy(for: .auto).sandbox["type"] as? String, "workspaceWrite")
+        XCTAssertEqual(CodexBackend.policy(for: .fullAccess).approval, "never")
+
+        XCTAssertFalse(SystemTwoHarness.opencode.modes.contains(.auto))
+        XCTAssertEqual(SystemTwoHarness.claudeCode.modes, AgentMode.allCases)
+    }
+
+    func testPlanInstructionIsHidden() {
+        let sent = SpaceWorkspace.wrap(context: SpaceWorkspace.planInstruction, around: "tidy my desktop")
+        XCTAssertEqual(SpaceWorkspace.stripContext(sent), "tidy my desktop")
+    }
 }

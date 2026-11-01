@@ -52,6 +52,9 @@ struct AgentView: View {
                         if let offer = agent.learnOffer, offer.itemID == item.id {
                             LearnOfferCard(offer: offer, thread: thread)
                         }
+                        if agent.planReadyItemID == item.id {
+                            PlanReadyCard(thread: thread)
+                        }
                     }
                     if agent.isBusy {
                         AgentActivityView(thread: thread).id("busy")
@@ -301,6 +304,14 @@ struct PermissionCard: View {
     let onReply: (String) -> Void
 
     var body: some View {
+        if let plan = permission.plan {
+            PlanApprovalCard(plan: plan, onReply: onReply)
+        } else {
+            commandCard
+        }
+    }
+
+    private var commandCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             Label("Allow \(permission.permission)?", systemImage: "hand.raised.fill")
                 .font(.caption.weight(.semibold))

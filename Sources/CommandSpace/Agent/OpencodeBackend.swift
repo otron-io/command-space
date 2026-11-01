@@ -42,11 +42,14 @@ final class OpencodeBackend: AgentBackend {
         return id
     }
 
-    func send(_ text: String, context: String?, to session: String) async throws {
+    func send(_ text: String, context: String?, mode: AgentMode, to session: String) async throws {
         var parts: [[String: Any]] = [["type": "text", "text": text]]
         // Sent as a hidden (synthetic) part so the chat shows only what was said.
         if let context { parts.insert(["type": "text", "text": context, "synthetic": true], at: 0) }
         var body: [String: Any] = ["parts": parts]
+        // Plan mode is opencode's built-in plan agent. Other modes use the workspace's own agent;
+        // Command Space answers the approvals those modes skip.
+        if mode == .plan { body["agent"] = "plan" }
         let override = Defaults[.agentModelOverride]
         if let slash = override.firstIndex(of: "/") {
             body["model"] = ["providerID": String(override[..<slash]),
@@ -54,6 +57,8 @@ final class OpencodeBackend: AgentBackend {
         }
         _ = try await request("POST", "/session/\(session)/prompt_async", body: body)
     }
+
+    func setMode(_ mode: AgentMode, for session: String) {}
 
     func abort(_ session: String) {
         Task { _ = try? await request("POST", "/session/\(session)/abort") }

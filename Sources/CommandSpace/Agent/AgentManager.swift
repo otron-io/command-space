@@ -52,6 +52,10 @@ struct AgentPermission: Identifiable, Equatable {
     let permission: String
     let patterns: [String]
     let callID: String?
+    /// Set when the agent is asking to leave plan mode with this plan.
+    var plan: String? = nil
+
+    var isEdit: Bool { ["edit", "write", "patch", "multiedit", "apply_patch"].contains(permission.lowercased()) }
 }
 
 enum AgentModelState: Equatable {
@@ -166,7 +170,13 @@ final class AgentThread: ObservableObject, Identifiable {
     @Published private(set) var followUp: AgentFollowUp?
     /// "Make this instant?" offer for the last finished task (System 2 teaches System 1).
     @Published private(set) var learnOffer: LearnCandidate?
+    /// How much the agent may do without asking, for this conversation.
+    @Published private(set) var mode: AgentMode
+    /// The plan reply (in plan mode) that can be run with one click; keyed by its item id.
+    @Published private(set) var planReadyItemID: String?
 
+    /// The user picked a mode for this conversation (so it survives the harness being chosen).
+    private var modeChosen = false
     private var taskToolIDs: Set<String> = []
     private var taskGenTokens = 0
     private var taskGenSeconds: Double = 0
@@ -180,8 +190,51 @@ final class AgentThread: ObservableObject, Identifiable {
 
     init(sessionID: String = "", harness: SystemTwoHarness? = nil, title: String = "") {
         self.sessionID = sessionID
-        self.harness = harness ?? Defaults[.systemTwoHarness]
+        let harness = harness ?? Defaults[.systemTwoHarness]
+        self.harness = harness
+        self.mode = harness.defaultMode
         self.title = title
+    }
+
+    // MARK: Mode
+
+    func setMode(_ mode: AgentMode) {
+        guard harness.modes.contains(mode), mode != self.mode else { return }
+        self.mode = mode
+        modeChosen = true
+        if mode != .plan { planReadyItemID = nil }
+        if !sessionID.isEmpty { backend.setMode(mode, for: sessionID) }
+        // Approvals the new mode no longer needs are answered now.
+        for permission in permissions where autoApproves(permission) {
+            reply(to: permission, with: PermissionReply.once.rawValue)
+        }
+    }
+
+    /// ⇧⇥: the next mode this harness offers.
+    func cycleMode() {
+        let modes = harness.modes
+        guard let index = modes.firstIndex(of: mode) else { setMode(.ask); return }
+        setMode(modes[(index + 1) % modes.count])
+    }
+
+    /// After a plan: switch to the harness's working mode and go.
+    func runPlan() {
+        planReadyItemID = nil
+        setMode(harness.executionMode)
+        send("Go ahead with the plan.")
+    }
+
+    func dismissPlan() { planReadyItemID = nil }
+
+    /// Approvals Command Space answers itself because the mode says not to ask.
+    /// (Harnesses with a native equivalent never send these in the first place.)
+    private func autoApproves(_ permission: AgentPermission) -> Bool {
+        guard permission.plan == nil else { return false }
+        switch mode {
+        case .fullAccess: return true
+        case .acceptEdits: return permission.isEdit
+        case .plan, .ask, .auto: return false
+        }
     }
 
     var isEmpty: Bool { items.isEmpty && !isBusy && sessionID.isEmpty }
@@ -228,6 +281,7 @@ final class AgentThread: ObservableObject, Identifiable {
                 if sessionID.isEmpty {
                     // A fresh conversation goes to the harness chosen in Settings right now.
                     harness = Defaults[.systemTwoHarness]
+                    if !modeChosen || !harness.modes.contains(mode) { mode = harness.defaultMode }
                     isBusy = true
                     sessionID = try await backend.createSession()
                     manager.register(self)
@@ -241,7 +295,8 @@ final class AgentThread: ObservableObject, Identifiable {
                    (refers != nil && refers != "none") || (refers == nil && RequestParsing.mentionsOnScreen(trimmed)) {
                     context = screen.promptBlock(focus: refers)
                 }
-                try await backend.send(trimmed, context: context, to: sessionID)
+                planReadyItemID = nil
+                try await backend.send(trimmed, context: context, mode: mode, to: sessionID)
             } catch {
                 isBusy = false
                 appendError("Couldn't reach \(harness.name): \(error.localizedDescription)")
@@ -332,7 +387,10 @@ final class AgentThread: ObservableObject, Identifiable {
         if DecisionEngine.shared.decisionsAvailable, Defaults[.jevInstantActions] {
             learnOffer = LearnedActions.shared.candidate(from: items)
         }
-        if let last = items.last, last.kind == .assistant { SpaceMarkEvents.fire(.success) }
+        if let last = items.last, last.kind == .assistant {
+            SpaceMarkEvents.fire(.success)
+            if mode == .plan, permissions.isEmpty { planReadyItemID = last.id; learnOffer = nil }
+        }
         if showResultWhenDone {
             showResultWhenDone = false
             let reply = items.last(where: { $0.kind == .assistant || $0.kind == .error })?.text ?? ""
@@ -441,6 +499,10 @@ final class AgentThread: ObservableObject, Identifiable {
             appendError(message)
         case .permission(let permission):
             guard !permissions.contains(where: { $0.id == permission.id }) else { return }
+            if autoApproves(permission) {
+                backend.reply(to: permission, with: .once)
+                return
+            }
             permissions.append(permission)
             SpaceMarkEvents.fire(.attention)
             manager.permissionAsked(in: self)
@@ -450,6 +512,9 @@ final class AgentThread: ObservableObject, Identifiable {
         case .generated(let tokens, let seconds):
             taskGenTokens += tokens
             if let seconds, seconds > 0 { taskGenSeconds += seconds }
+        case .mode(let mode):
+            self.mode = mode
+            if mode != .plan { planReadyItemID = nil }
         }
     }
 

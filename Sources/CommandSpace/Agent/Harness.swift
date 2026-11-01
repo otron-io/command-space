@@ -337,3 +337,98 @@ enum HarnessLogin {
         }
     }
 }
+
+// MARK: - Modes
+
+/// How much the agent may do on its own. Each harness maps these to its own controls:
+/// Claude Code's permission modes, Codex's approval policy + sandbox, opencode's plan agent.
+/// Approvals a harness can't skip natively are answered by Command Space (see AgentThread).
+enum AgentMode: String, CaseIterable, Defaults.Serializable, Identifiable {
+    case plan
+    case ask
+    case acceptEdits
+    case auto
+    case fullAccess
+
+    var id: String { rawValue }
+
+    var name: String {
+        switch self {
+        case .plan: return "Plan"
+        case .ask: return "Ask first"
+        case .acceptEdits: return "Accept edits"
+        case .auto: return "Auto"
+        case .fullAccess: return "Full access"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .plan: return "list.bullet.clipboard"
+        case .ask: return "hand.raised"
+        case .acceptEdits: return "pencil.line"
+        case .auto: return "sparkles"
+        case .fullAccess: return "exclamationmark.shield"
+        }
+    }
+
+    /// Modes that let the agent act without asking are tinted so they're noticed.
+    var isPermissive: Bool { self == .auto || self == .fullAccess }
+
+    func summary(on harness: SystemTwoHarness) -> String {
+        switch (self, harness) {
+        case (.plan, .claudeCode): return "Claude Code's plan mode: it investigates without changing anything, then asks you to approve a plan."
+        case (.plan, .codex): return "Read-only sandbox. Codex looks around and replies with a plan; nothing is changed."
+        case (.plan, .opencode): return "opencode's plan agent: it looks around and replies with a plan; nothing is changed."
+        case (.ask, .codex): return "Commands Codex knows are read-only run; everything else asks."
+        case (.ask, _): return "Asks before every command and file edit."
+        case (.acceptEdits, _): return "File edits go through; commands still ask."
+        case (.auto, .claudeCode): return "Claude Code's auto mode: a safety check approves routine actions and asks about risky ones."
+        case (.auto, _): return "Works without asking inside a sandbox (writes only in its workspace, no network) and asks to go beyond it."
+        case (.fullAccess, _): return "Everything runs without asking. Use with care."
+        }
+    }
+}
+
+extension SystemTwoHarness {
+    var modes: [AgentMode] {
+        switch self {
+        case .opencode: return [.plan, .ask, .acceptEdits, .fullAccess]
+        case .codex, .claudeCode: return AgentMode.allCases
+        }
+    }
+
+    var defaultModeKey: Defaults.Key<AgentMode> {
+        switch self {
+        case .opencode: return .opencodeMode
+        case .codex: return .codexMode
+        case .claudeCode: return .claudeMode
+        }
+    }
+
+    /// The mode new conversations on this harness start in.
+    var defaultMode: AgentMode {
+        let mode = Defaults[defaultModeKey]
+        return modes.contains(mode) ? mode : .ask
+    }
+
+    /// Where a conversation goes after its plan is approved.
+    var executionMode: AgentMode {
+        defaultMode == .plan ? .ask : defaultMode
+    }
+}
+
+extension Defaults.Keys {
+    static let opencodeMode = Key<AgentMode>("opencodeMode", default: .ask)
+    static let codexMode = Key<AgentMode>("codexMode", default: .ask)
+    static let claudeMode = Key<AgentMode>("claudeMode", default: .ask)
+}
+
+extension SpaceWorkspace {
+    /// Sent (hidden) with requests in plan mode on harnesses without a native plan mode.
+    static let planInstruction = """
+    [Plan mode] Don't change anything yet: no edits, no commands with side effects. Look around with \
+    read-only commands if useful, then reply with a short numbered plan of what you'll do. The user \
+    will switch modes and tell you to go ahead.
+    """
+}

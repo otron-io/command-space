@@ -27,6 +27,8 @@ enum AgentEvent {
     case permissionResolved(String)
     /// Tokens generated, and how long generating them took when known.
     case generated(tokens: Int, seconds: Double?)
+    /// The harness changed the conversation's mode itself (e.g. after a plan was approved).
+    case mode(AgentMode)
 }
 
 /// A conversation's state as stored by the harness.
@@ -37,6 +39,7 @@ struct AgentSnapshot {
     var title: String?
 }
 
+/// For a plan approval: once = approve, always = approve and accept edits, reject = keep planning.
 enum PermissionReply: String {
     case once, always, reject
 }
@@ -55,7 +58,9 @@ protocol AgentBackend: AnyObject {
 
     func createSession() async throws -> String
     /// `context` is what the user was looking at; harnesses send it without showing it.
-    func send(_ text: String, context: String?, to session: String) async throws
+    func send(_ text: String, context: String?, mode: AgentMode, to session: String) async throws
+    /// Switch a conversation's mode now (harnesses that apply modes per request can ignore it).
+    func setMode(_ mode: AgentMode, for session: String)
     func abort(_ session: String)
     func reply(to permission: AgentPermission, with reply: PermissionReply)
 

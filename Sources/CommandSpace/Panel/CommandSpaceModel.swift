@@ -146,7 +146,11 @@ final class CommandSpaceModel: ObservableObject {
         case 125: move(1); return true                       // ↓
         case 126: move(-1); return true                      // ↑
         case 48:                                             // ⇥
-            if event.modifierFlags.contains(.shift) { mode = .search; search.update(query: query); return true }
+            if event.modifierFlags.contains(.shift) {
+                // In a conversation ⇧⇥ cycles the agent's mode (esc goes back to search).
+                if mode == .agent { agent.current.cycleMode() } else { mode = .search; search.update(query: query) }
+                return true
+            }
             askSpace()
             return true
         case 53: escape(); return true                       // esc

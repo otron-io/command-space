@@ -188,3 +188,49 @@ struct HarnessModelSection: View {
         }
     }
 }
+
+/// The mode new conversations on a harness start in (each conversation can switch with ⇧⇥).
+struct HarnessModeSection: View {
+    let harness: SystemTwoHarness
+    @State private var selection: AgentMode = .ask
+
+    var body: some View {
+        Section {
+            ForEach(harness.modes) { mode in
+                Button {
+                    selection = mode
+                    Defaults[harness.defaultModeKey] = mode
+                } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: selection == mode ? "largecircle.fill.circle" : "circle")
+                            .foregroundStyle(selection == mode ? Color.accentColor : .secondary)
+                            .font(.system(size: 14))
+                        Image(systemName: mode.icon)
+                            .frame(width: 18)
+                            .foregroundStyle(mode == .fullAccess ? .orange : .secondary)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(mode.name)
+                            Text(mode.summary(on: harness))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(mode.name)
+                .accessibilityAddTraits(selection == mode ? .isSelected : [])
+            }
+        } header: {
+            Text("Default mode")
+        } footer: {
+            Text("New \(harness.name) conversations start in this mode. Switch a conversation's mode from the chip next to the conversation, or with ⇧⇥ in Command Space.")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+        .onAppear { selection = harness.defaultMode }
+        .onChange(of: harness) { selection = harness.defaultMode }
+    }
+}

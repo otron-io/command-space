@@ -51,7 +51,14 @@ Old threads are in the **conversations window**: press ⌘Y in the panel, or use
 
 Command Space finds the Codex and Claude Code CLIs on its own and shows whether each is signed in. It never stores a key for them. It also removes `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`-style variables before launching them, and it won't run either CLI while it's signed in with an API key. New conversations use the selected harness, and existing ones stay on the harness they started on. Conversation history lists all of them.
 
-Every shell command or file edit with side effects asks for your approval first. When a task finishes using simple commands, Command Space offers **Make this instant**. After that, System One replays it directly, and it appears in search as a learned command.
+**Modes** control how much the agent does on its own. You set a default per harness in **Settings → System Two**, and each conversation can switch from its mode chip or with **⇧⇥**:
+- **Plan:** looks around and proposes a plan without changing anything. In Claude Code, you approve the plan to start; elsewhere, click **Run** under the plan.
+- **Ask first:** asks before every command and edit (the default).
+- **Accept edits:** file edits go through without asking.
+- **Auto:** Claude Code's auto mode, or Codex working in its sandbox.
+- **Full access:** never asks.
+
+In Ask first, every shell command or file edit with side effects asks for your approval first. When a task finishes using simple commands, Command Space offers **Make this instant**. After that, System One replays it directly, and it appears in search as a learned command.
 
 **It knows what "this" is.** Command Space never takes focus from your app, so when you ask about "this", it reads your selection, the selected Finder files, the browser page and the window you were in.
 

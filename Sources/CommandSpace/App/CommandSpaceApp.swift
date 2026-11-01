@@ -24,7 +24,8 @@ struct CommandSpaceMain {
             exit(ok ? 0 : 1)
         }
         if let flag = args.firstIndex(of: "--harness-check"), args.count > flag + 1 {
-            MainActor.assumeIsolated { HarnessCheck.run(args[flag + 1]) }
+            let mode = args.count > flag + 2 ? AgentMode(rawValue: args[flag + 2]) ?? .ask : .ask
+            MainActor.assumeIsolated { HarnessCheck.run(args[flag + 1], mode: mode) }
             NSApplication.shared.setActivationPolicy(.prohibited)
             NSApplication.shared.run()
         }

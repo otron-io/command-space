@@ -2,7 +2,7 @@
 //  HarnessCheck.swift
 //  Command Space
 //
-//  `CommandSpace --harness-check codex|claudeCode|opencode`: runs a two-turn conversation on one
+//  `CommandSpace --harness-check codex|claudeCode|opencode [mode]`: runs a two-turn conversation on one
 //  harness without any UI and prints every event, approving each request once. For checking a
 //  harness end to end (sign-in, streaming, approvals, resuming, history).
 //
@@ -12,7 +12,7 @@ import Foundation
 
 @MainActor
 enum HarnessCheck {
-    static func run(_ name: String) {
+    static func run(_ name: String, mode: AgentMode = .ask) {
         guard let harness = SystemTwoHarness(rawValue: name) else {
             print("unknown harness \(name)"); exit(2)
         }
@@ -25,16 +25,20 @@ enum HarnessCheck {
         }
         var idle: CheckedContinuation<Void, Never>?
         var sawBusy = false
+        var current = mode
         AgentBackendSink.changed = { _ in print("· connection: \(backend.connection) model: \(backend.modelState)") }
         AgentBackendSink.event = { _, session, event in
             switch event {
             case .delta: return
             case .permission(let permission):
-                print("· permission \(permission.permission): \(permission.patterns.joined()) → once")
+                print("· permission \(permission.permission): \(permission.plan.map { "PLAN " + $0.prefix(200) } ?? permission.patterns.joined()) → once")
                 backend.reply(to: permission, with: .once)
             case .busy(let busy):
                 print("· busy \(busy)")
                 if busy { sawBusy = true } else if sawBusy { sawBusy = false; idle?.resume(); idle = nil }
+            case .mode(let new):
+                print("· mode → \(new.rawValue)")
+                current = new
             default:
                 print("· \(String(describing: event).prefix(220))")
             }
@@ -51,7 +55,7 @@ enum HarnessCheck {
                 ]
                 for (n, text) in turns.enumerated() {
                     print("== turn \(n + 1)")
-                    try await backend.send(text, context: n == 0 ? "App: Finder" : nil, to: session)
+                    try await backend.send(text, context: n == 0 ? "App: Finder" : nil, mode: current, to: session)
                     await withCheckedContinuation { idle = $0 }
                 }
                 let snapshot = await backend.snapshot(of: session)

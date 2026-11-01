@@ -58,6 +58,7 @@ struct AgentSettings: View {
                 LearnedActionsSection()
             case .systemTwo:
                 HarnessPickerSection()
+                HarnessModeSection(harness: harness)
                 if harness == .opencode {
                     opencodeSections
                 } else {
