@@ -3,6 +3,14 @@
   <channel>
     <title>Command Space</title>
     <item>
+      <title>Command Space 0.1.1</title>
+      <pubDate>Sun, 01 Nov 2026 14:56:55 +0100</pubDate>
+      <sparkle:version>2</sparkle:version>
+      <sparkle:shortVersionString>0.1.1</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/otron-io/command-space/releases/download/v0.1.1/Command-Space.dmg" sparkle:edSignature="kJNkXI+MUYSmj7OZSvrGhWfkXHV/yxQNeAk/iqwGuOVjB2uNbVK5f1bSV6wW87v2GWCUV3p18/15QI4dCfzdDw==" length="7563860" type="application/octet-stream"/>
+    </item>
+    <item>
       <title>Command Space 0.1.0</title>
       <pubDate>Sun, 01 Nov 2026 13:54:17 +0100</pubDate>
       <sparkle:version>1</sparkle:version>
