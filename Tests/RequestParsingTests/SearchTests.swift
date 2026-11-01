@@ -82,3 +82,70 @@ final class QuickOpenTests: XCTestCase {
         XCTAssertNil(QuickOpen.webURL(from: "3.14"))
     }
 }
+
+final class LevelWordTests: XCTestCase {
+    func testLevels() {
+        XCTAssertEqual(RequestParsing.statedLevel(in: "set volume to 50"), 50)
+        XCTAssertEqual(RequestParsing.statedLevel(in: "volume max"), 100)
+        XCTAssertEqual(RequestParsing.statedLevel(in: "brightness half"), 50)
+        XCTAssertEqual(RequestParsing.statedLevel(in: "turn the sound off"), 0)
+        XCTAssertNil(RequestParsing.statedLevel(in: "volume up"))
+        XCTAssertNil(RequestParsing.statedLevel(in: "lower the volume"))
+    }
+}
+
+@MainActor
+final class CommandDetectionTests: XCTestCase {
+    func testDetect() {
+        XCTAssertEqual(CommandPreview.detect("play taylor swift cruel summer"), ["play_music"])
+        XCTAssertEqual(CommandPreview.detect("set volume to 50"), ["set_volume"])
+        XCTAssertEqual(CommandPreview.detect("brightness max"), ["set_brightness"])
+        XCTAssertEqual(CommandPreview.detect("timer 10 minutes"), ["set_timer"])
+        XCTAssertEqual(CommandPreview.detect("10 min pasta"), ["set_timer"])
+        XCTAssertEqual(CommandPreview.detect("remind me to call mom at 6"), ["add_reminder"])
+        XCTAssertTrue(CommandPreview.detect("volume up").isEmpty)
+        XCTAssertTrue(CommandPreview.detect("safari").isEmpty)
+        XCTAssertTrue(CommandPreview.detect("playground").isEmpty)
+    }
+
+    func testVolumeRow() {
+        let rows = CommandPreview.rows(for: ["set_volume"], typed: "set volume to 50", shortcuts: [])
+        XCTAssertEqual(rows.first?.title, "Set volume to 50%")
+        XCTAssertEqual(rows.first?.action, .resolved(.volume(0.5)))
+    }
+
+    func testShortcutRow() {
+        let rows = CommandPreview.rows(for: ["run_shortcut"], typed: "run morning routine", shortcuts: ["Morning Routine", "Focus"])
+        XCTAssertEqual(rows.first?.title, "Run “Morning Routine”")
+    }
+}
+
+final class BareHourTests: XCTestCase {
+    private func date(_ day: Int, _ hour: Int, _ minute: Int = 0) -> Date {
+        Calendar.current.date(from: DateComponents(year: 2026, month: 11, day: day, hour: hour, minute: minute))!
+    }
+
+    func testAtSix() {
+        let r = RequestParsing.datedText("remind me to call mom at 6", commandPatterns: RequestParsing.reminderCommands, now: date(1, 13))
+        XCTAssertEqual(r.title, "Call mom")
+        XCTAssertEqual(r.date, date(1, 18))
+        XCTAssertTrue(r.hasTime)
+    }
+
+    func testAtSixLateEvening() {
+        let r = RequestParsing.datedText("remind me to call mom at 6", commandPatterns: RequestParsing.reminderCommands, now: date(1, 20))
+        XCTAssertEqual(r.date, date(2, 18))
+    }
+
+    func testMorningHourStillAhead() {
+        let r = RequestParsing.datedText("remind me to stretch at 9", commandPatterns: RequestParsing.reminderCommands, now: date(1, 8))
+        XCTAssertEqual(r.date, date(1, 9))
+        XCTAssertEqual(r.title, "Stretch")
+    }
+
+    func testTomorrowAtSix() {
+        let r = RequestParsing.datedText("remind me to call mom tomorrow at 6", commandPatterns: RequestParsing.reminderCommands, now: date(1, 13))
+        XCTAssertEqual(r.date, date(2, 18))
+        XCTAssertEqual(r.title, "Call mom")
+    }
+}

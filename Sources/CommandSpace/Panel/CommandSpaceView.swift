@@ -301,7 +301,9 @@ struct CommandSpaceView: View {
     static func verb(for result: SearchResult) -> String {
         switch result.kind {
         case .app, .document, .folder, .place, .setting, .address, .web: return "Open"
-        case .command, .system, .shortcut: return "Run"
+        case .command, .system, .shortcut:
+            if case .resolved(.spotify) = result.action { return "Play" }
+            return "Run"
         case .calculation: return "Copy"
         case .ask: return "Ask"
         case .conversation: return "Continue"
@@ -380,6 +382,10 @@ struct ResultRow: View {
                 .resizable()
                 .interpolation(.high)
                 .aspectRatio(contentMode: .fit)
+        case .remote(let url, let rounded):
+            RemoteArtwork(url: url)
+                .frame(width: 30, height: 30)
+                .clipShape(RoundedRectangle(cornerRadius: rounded ? 6 : 15, style: .continuous))
         case .symbol(let name, let tint):
             Image(systemName: name)
                 .font(.system(size: 13, weight: .semibold))
@@ -389,6 +395,32 @@ struct ResultRow: View {
         case .mark:
             SpaceMarkBadge(mood: .idle)
                 .frame(width: 26)
+        }
+    }
+}
+
+/// Album covers and artist photos, cached for the session.
+struct RemoteArtwork: View {
+    let url: URL
+    @State private var image: NSImage?
+
+    private static var cache: [URL: NSImage] = [:]
+
+    var body: some View {
+        ZStack {
+            Color.white.opacity(0.08)
+            if let image {
+                Image(nsImage: image).resizable().aspectRatio(contentMode: .fill)
+            } else {
+                Image(systemName: "music.note").font(.system(size: 12, weight: .semibold)).foregroundStyle(.gray)
+            }
+        }
+        .task(id: url) {
+            if let cached = Self.cache[url] { image = cached; return }
+            guard let (data, _) = try? await URLSession.shared.data(from: url), let loaded = NSImage(data: data) else { return }
+            if Self.cache.count > 300 { Self.cache.removeAll() }
+            Self.cache[url] = loaded
+            withAnimation(.easeOut(duration: 0.15)) { image = loaded }
         }
     }
 }

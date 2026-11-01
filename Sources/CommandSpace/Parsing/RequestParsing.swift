@@ -21,6 +21,20 @@ enum RequestParsing {
         return value
     }
 
+    /// A level stated as a number or in words ("max", "half", "off"), as 0–100.
+    static func statedLevel(in text: String) -> Float? {
+        if let number = statedPercent(in: text) { return number }
+        let lower = text.lowercased()
+        let words: [(String, Float)] = [
+            (#"\b(max|maximum|full|all the way up|loudest|brightest)\b"#, 100),
+            (#"\b(three quarters)\b"#, 75),
+            (#"\b(half|halfway|medium|middle)\b"#, 50),
+            (#"\b(a quarter|quarter|low|quiet)\b"#, 25),
+            (#"\b(off|zero|silent|min|minimum|lowest)\b"#, 0),
+        ]
+        return words.first { lower.range(of: $0.0, options: .regularExpression) != nil }?.1
+    }
+
     // MARK: Music
 
     /// "Play Bohemian Rhapsody by Queen on Spotify" → ("Bohemian Rhapsody", "Queen").
@@ -169,6 +183,18 @@ enum RequestParsing {
             }
         }
 
+        // A bare hour the detector skips: "at 6", "at 6:30", alone or after a day ("tomorrow at 6").
+        if !hasTime, let match = working.range(of: #"\bat\s+(\d{1,2})(:(\d{2}))?\b(?!\s*(%|percent|min|minutes|hours|hrs|h\b))"#,
+                                              options: [.regularExpression, .caseInsensitive]) {
+            let digits = working[match].dropFirst(2).trimmingCharacters(in: .whitespaces).split(separator: ":")
+            if let hour = Int(digits[0]), (1...12).contains(hour) || (13...23).contains(hour) {
+                let minute = digits.count > 1 ? Int(digits[1]) ?? 0 : 0
+                date = bareHour(hour, minute: minute, on: date, now: now)
+                hasTime = date != nil
+                if hasTime { working.removeSubrange(match) }
+            }
+        }
+
         for pattern in commandPatterns + [#"^(hey\s+)?((notch|space)[,\s]+)?(please\s+)?(can you\s+|could you\s+)?"#] {
             working = working.replacingOccurrences(of: pattern, with: "", options: [.regularExpression, .caseInsensitive])
                 .trimmingCharacters(in: .whitespaces)
@@ -181,6 +207,18 @@ enum RequestParsing {
         }
         if let first = working.first { working = first.uppercased() + working.dropFirst() }
         return DatedText(title: working, date: date, duration: duration, hasTime: hasTime)
+    }
+
+    /// The next sensible moment for a bare hour: "6" is 6 pm unless 6 am is still ahead today
+    /// and plausible; hours before 7 are always afternoon/evening. On a given day, the same rule.
+    static func bareHour(_ hour: Int, minute: Int, on day: Date?, now: Date) -> Date? {
+        let calendar = Calendar.current
+        func at(_ h: Int, _ base: Date) -> Date? { calendar.date(bySettingHour: h, minute: minute, second: 0, of: base) }
+        if hour > 12 { return at(hour, day ?? now).map { $0 < now && day == nil ? calendar.date(byAdding: .day, value: 1, to: $0)! : $0 } }
+        let candidates = hour < 7 ? [hour + 12] : (hour == 12 ? [12] : [hour, hour + 12])
+        if let day, !calendar.isDate(day, inSameDayAs: now) { return at(candidates[0], day) }
+        if let next = candidates.compactMap({ at($0, now) }).first(where: { $0 > now }) { return next }
+        return calendar.date(byAdding: .day, value: 1, to: now).flatMap { at(candidates[0], $0) }
     }
 
     static let reminderCommands = [

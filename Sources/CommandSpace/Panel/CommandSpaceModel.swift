@@ -255,6 +255,13 @@ final class CommandSpaceModel: ObservableObject {
         case .system(let id):
             onHide?()
             QuickOpen.systemCommands.first { $0.id == id }?.run()
+        case .resolved(let command):
+            onHide?()
+            Task {
+                if let outcome = await CommandPreview.run(command) {
+                    agent.flashResult(icon: outcome.icon, label: outcome.label)
+                }
+            }
         case .conversation(let id):
             onHide?()
             ThreadWindowController.shared.show(agent.thread(forSession: id))

@@ -25,6 +25,18 @@ struct SpotifyItem: Equatable {
     let uri: String
     let name: String
     let subtitle: String
+    /// track | album | artist | playlist (from the URI).
+    var kind: String { uri.split(separator: ":").dropFirst().first.map(String.init) ?? "track" }
+    /// Cover art or artist photo, small size.
+    var imageURL: URL? = nil
+
+    /// Picks the smallest image that's still crisp at row size.
+    static func image(from images: Any?) -> URL? {
+        guard let list = images as? [[String: Any]], !list.isEmpty else { return nil }
+        let sorted = list.sorted { ($0["width"] as? Int ?? 0) < ($1["width"] as? Int ?? 0) }
+        let pick = sorted.first { ($0["width"] as? Int ?? 0) >= 120 } ?? sorted.last
+        return (pick?["url"] as? String).flatMap(URL.init(string:))
+    }
 }
 
 @MainActor
@@ -202,12 +214,14 @@ final class SpotifyClient: ObservableObject {
     /// kind: track | artist | album | playlist
     func search(_ query: String, kind: String, limit: Int = 6) async -> [SpotifyItem] {
         guard let json = await api("/search", query: ["q": query, "type": kind, "limit": "\(limit)"]) as? [String: Any],
-              let items = (json[kind + "s"] as? [String: Any])?["items"] as? [[String: Any]] else { return [] }
-        return items.compactMap { item in
+              let raw = (json[kind + "s"] as? [String: Any])?["items"] as? [Any] else { return [] }
+        // Playlist results can contain nulls (removed playlists); skip them rather than failing.
+        return raw.compactMap { $0 as? [String: Any] }.compactMap { item in
             guard let uri = item["uri"] as? String, let name = item["name"] as? String else { return nil }
             let artists = (item["artists"] as? [[String: Any]])?.compactMap { $0["name"] as? String }.joined(separator: ", ")
             let owner = (item["owner"] as? [String: Any])?["display_name"] as? String
-            return SpotifyItem(uri: uri, name: name, subtitle: artists ?? owner ?? "")
+            let images = (item["album"] as? [String: Any])?["images"] ?? item["images"]
+            return SpotifyItem(uri: uri, name: name, subtitle: artists ?? owner ?? "", imageURL: SpotifyItem.image(from: images))
         }
     }
 
@@ -217,12 +231,13 @@ final class SpotifyClient: ObservableObject {
         var offset = 0
         while offset < 250 {
             guard let json = await api("/me/playlists", query: ["limit": "50", "offset": "\(offset)"]) as? [String: Any],
-                  let items = json["items"] as? [[String: Any]] else { break }
+                  let raw = json["items"] as? [Any] else { break }
+            let items = raw.compactMap { $0 as? [String: Any] }
             all += items.compactMap { item in
                 guard let uri = item["uri"] as? String, let name = item["name"] as? String else { return nil }
-                return SpotifyItem(uri: uri, name: name, subtitle: "")
+                return SpotifyItem(uri: uri, name: name, subtitle: "", imageURL: SpotifyItem.image(from: item["images"]))
             }
-            if items.count < 50 { break }
+            if raw.count < 50 { break }
             offset += 50
         }
         if !all.isEmpty {

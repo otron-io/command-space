@@ -49,6 +49,8 @@ struct SearchResult: Identifiable, Equatable {
 
     enum Icon: Equatable {
         case file(URL)
+        /// Artwork from the web (album covers); `rounded` false draws a circle (artists).
+        case remote(URL, rounded: Bool)
         case symbol(String, Color)
         case mark
     }
@@ -61,6 +63,8 @@ struct SearchResult: Identifiable, Equatable {
         case ask(String)
         case shortcut(String)
         case conversation(id: String)
+        /// A System One command with everything filled in from what was typed.
+        case resolved(ResolvedCommand)
     }
 
     let id: String
@@ -93,6 +97,8 @@ final class SearchEngine: ObservableObject {
     private var currentQuery = ""
     private var snapTask: Task<Void, Never>?
     private var snapAnswer: (query: String, pick: String?, intent: String?, command: String?)?
+    private var musicTask: Task<Void, Never>?
+    private var music: (query: String, rows: [SearchResult])?
 
     private var appsObserver: AnyCancellable?
 
@@ -120,6 +126,7 @@ final class SearchEngine: ObservableObject {
         }
         fileHits = fileHits.filter { $0.name.lowercased().contains(query.lowercased().split(separator: " ").first.map(String.init) ?? "") }
         rebuild()
+        if CommandPreview.detect(query).contains("play_music") { scheduleMusic(for: query) } else { musicTask?.cancel() }
         if Defaults[.searchFiles], query.count >= 2, QuickOpen.webURL(from: query) == nil, Calculator.evaluate(query) == nil {
             files.search(query) { [weak self] hits in
                 guard let self, self.currentQuery == query else { return }
@@ -214,6 +221,19 @@ final class SearchEngine: ObservableObject {
                               score: 0.3 + 0.4 * nameScore + recency - Double(index) * 0.004 + UsageStore.boost(for: hit.id, query: q)))
         }
 
+        // Commands with their details filled in ("Set volume to 50%", the actual song), in place
+        // of the generic "type the details" rows for the same command.
+        var commandIDs = CommandPreview.detect(query)
+        if let picked = snapAnswer?.query == query ? snapAnswer?.command : nil { commandIDs.insert(picked) }
+        let resolved = CommandPreview.rows(for: commandIDs.subtracting(["play_music"]), typed: query, shortcuts: shortcuts)
+        var resolvedIDs = Set(resolved.compactMap { $0.id.split(separator: ":").dropFirst().first.map(String.init) })
+        list += resolved
+        if let music, music.query == query, !music.rows.isEmpty {
+            list += music.rows
+            resolvedIDs.insert("play_music")
+        }
+        list.removeAll { $0.id.hasPrefix("cmd:") && resolvedIDs.contains(String($0.id.dropFirst(4))) }
+
         // The agent is always one keystroke away (⇥). Sentences and questions put it on top.
         list.append(.init(id: "ask", kind: .ask, title: query, subtitle: "Ask Space",
                           icon: .mark, action: .ask(query), score: askScore(query)))
@@ -261,6 +281,26 @@ final class SearchEngine: ObservableObject {
     private func abbreviate(_ url: URL) -> String {
         (url.path as NSString).abbreviatingWithTildeInPath
     }
+
+    // MARK: Music
+
+    private func scheduleMusic(for query: String) {
+        if music?.query == query || musicTask != nil && pendingMusicQuery == query { return }
+        musicTask?.cancel()
+        pendingMusicQuery = query
+        musicTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(220))  // wait for a pause in typing
+            guard !Task.isCancelled else { return }
+            let rows = await CommandPreview.music(for: query)
+            guard !Task.isCancelled, let self, self.currentQuery == query else { return }
+            self.music = (query, rows)
+            self.musicTask = nil
+            self.pendingMusicQuery = nil
+            withAnimation(.smooth(duration: 0.18)) { self.rebuild() }
+        }
+    }
+
+    private var pendingMusicQuery: String?
 
     // MARK: Snap 1
 
@@ -320,7 +360,9 @@ final class SearchEngine: ObservableObject {
 
     private func apply(_ answer: (query: String, pick: String?, intent: String?, command: String?)?, to list: inout [SearchResult]) {
         guard let answer, answer.query == currentQuery else { return }
-        if let commandID = answer.command {
+        let resolvedPrefix = answer.command == "play_music" ? "do:music:" : "do:\(answer.command ?? ""):"
+        if let commandID = answer.command, !list.contains(where: { $0.id.hasPrefix(resolvedPrefix) }) {
+            if commandID == "play_music", music?.query != currentQuery { scheduleMusic(for: currentQuery) }
             if let index = list.firstIndex(where: { $0.id == "cmd:" + commandID }) {
                 list[index].score += 0.35
                 list[index].snapPick = true
