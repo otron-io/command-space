@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Command Space</title>
+    <item>
+      <title>Command Space 0.1.0</title>
+      <pubDate>Sun, 01 Nov 2026 13:54:17 +0100</pubDate>
+      <sparkle:version>1</sparkle:version>
+      <sparkle:shortVersionString>0.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+      <enclosure url="https://github.com/otron-io/command-space/releases/download/v0.1.0/Command-Space.dmg" sparkle:edSignature="pE0l9ReG2AIYJ8PUmm0j2I1XFh+f4R7D6Ul8gpjiaRRuWHKURfeOfjiW7EAyInsQLAI7Twuon1+WnDdpf95QAQ==" length="7388043" type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>

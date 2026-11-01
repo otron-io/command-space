@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Command Space</string>
+	<key>CFBundleDisplayName</key>
+	<string>Command Space</string>
+	<key>CFBundleExecutable</key>
+	<string>Command Space</string>
+	<key>CFBundleIdentifier</key>
+	<string>io.otron.commandspace</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSPrincipalClass</key>
+	<string>NSApplication</string>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+	</dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Command Space listens while you hold the push-to-talk key, and for your whistle patterns if you turn them on. Speech is transcribed on this Mac.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Your requests are transcribed on this Mac by Apple's on-device speech model.</string>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Command Space adds events you ask for and reminds you before meetings.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Command Space adds reminders you ask for.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Command Space controls apps you ask it to (music, Finder, your browser's current page).</string>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/otron-io/command-space/main/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>tOKbxguj1HVbddhx27riwM+OOWYv5hzY7EvsLf0FaH0=</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>86400</integer>
+</dict>
+</plist>

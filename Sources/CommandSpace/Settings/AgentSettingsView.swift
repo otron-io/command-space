@@ -1,0 +1,1132 @@
+//
+//  AgentSettingsView.swift
+//  Command Space
+//
+//  Settings for Space, the agent, split the way it works:
+//  System One answers instant decisions (Snap 1 on this Mac, or TypeSafe's Jev);
+//  System Two is the agent itself (`opencode serve`: models, providers, credentials).
+//
+
+import AppKit
+import Defaults
+import KeyboardShortcuts
+import SwiftUI
+
+/// Pages of Command Space's settings, each shown as its own sidebar entry.
+enum AgentSettingsPage: String, CaseIterable {
+    case agent = "General"
+    case systemOne = "System One"
+    case systemTwo = "System Two"
+    case voice = "Voice"
+    case spotify = "Spotify"
+
+    var icon: String {
+        switch self {
+        case .agent: return "gearshape"
+        case .systemOne: return "bolt.fill"
+        case .systemTwo: return "brain"
+        case .voice: return "waveform"
+        case .spotify: return "music.note"
+        }
+    }
+}
+
+struct AgentSettings: View {
+    var page: AgentSettingsPage = .agent
+    @ObservedObject private var client = OpencodeConfigClient.shared
+    @Default(.agentServerURL) private var serverURL
+    @State private var connectProviderID = ""
+
+    var body: some View {
+        Form {
+            switch page {
+            case .agent:
+                Section {
+                    SetupChecklist()
+                } header: {
+                    Text("Setup")
+                }
+                GeneralSettingsSections()
+                SystemsOverviewSection()
+            case .systemOne:
+                DecisionEngineSection()
+                SnapModelSection()
+                JevSettingsSection()
+                SystemOneUsesSection()
+                LearnedActionsSection()
+            case .systemTwo:
+                connectionSection
+                modelSection
+                Section {
+                    ProviderAuthForm(providerID: "openai", preferOAuth: true)
+                } header: {
+                    Text("ChatGPT / Codex")
+                } footer: {
+                    Text("Log in with a ChatGPT Plus/Pro subscription to use OpenAI models without an API key. This replaces any OpenAI API key stored in opencode.")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                }
+                providersSection
+                connectSection
+            case .voice:
+                VoiceSettingsSection()
+                WhistleSettingsSection()
+            case .spotify:
+                SpotifySettingsSection()
+            }
+            if page == .agent || page == .systemTwo, let error = client.lastError {
+                Section {
+                    Label(error, systemImage: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+        
+        .navigationTitle(page.rawValue)
+        .task { await client.reload() }
+        .task(id: serverURL) {
+            while !Task.isCancelled {
+                await client.refreshHealth()
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+            }
+        }
+    }
+
+    // MARK: Connection
+
+    private var connectionSection: some View {
+        Section {
+            AgentServerURLField()
+            HStack {
+                Text("Status")
+                Spacer()
+                healthLabel
+            }
+            ServerControls()
+        } header: {
+            Text("Connection")
+        } footer: {
+            Text("System Two runs in a local `opencode serve` instance. Restart the app after changing the URL.")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+    }
+
+    @ViewBuilder
+    private var healthLabel: some View {
+        switch client.health {
+        case .unknown:
+            Label("Checking…", systemImage: "circle.dotted")
+                .foregroundStyle(.secondary)
+        case .healthy(let version):
+            HStack(spacing: 6) {
+                Circle().fill(.green).frame(width: 8, height: 8)
+                Text(version.isEmpty ? "Connected" : "Connected · opencode \(version)")
+                    .foregroundStyle(.secondary)
+            }
+        case .unreachable:
+            HStack(spacing: 6) {
+                Circle().fill(.red).frame(width: 8, height: 8)
+                Text("Unreachable").foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: Model
+
+    private var modelSection: some View {
+        Section {
+            ModelPickerRow(title: "Agent model", model: client.activeModel) { model in
+                Task { await client.setActiveModel(model) }
+            }
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Local (Gemma via llama.cpp)")
+                    Text(localModel.isEmpty ? "Not configured in opencode.json" : localModel)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if usingLocal {
+                    Label("In use", systemImage: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                } else {
+                    Button("Use local model") {
+                        Task { await client.setActiveModel(localModel) }
+                    }
+                    .disabled(localModel.isEmpty)
+                }
+            }
+        } header: {
+            Text("Model")
+        } footer: {
+            Text("Applies to the next prompt. Stored in this app only; your own opencode configuration isn't changed.")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+    }
+
+    /// The workspace default, falling back to the first model of the "local" provider.
+    private var localModel: String {
+        if OpencodeConfigClient.split(client.workspaceModel).0 == OpencodeConfigClient.localProviderID {
+            return client.workspaceModel
+        }
+        guard let local = client.provider(OpencodeConfigClient.localProviderID), let first = local.models.first else { return "" }
+        return "\(local.id)/\(first.id)"
+    }
+
+    private var usingLocal: Bool {
+        !localModel.isEmpty && client.activeModel == localModel
+    }
+
+    // MARK: Providers
+
+    private var providersSection: some View {
+        Section {
+            if client.connected.isEmpty {
+                Text(client.isLoading ? "Loading…" : "No providers available")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(client.connected) { provider in
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(provider.name)
+                        Text("\(provider.models.count) models")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    customBadge(text: Self.sourceLabel(provider))
+                    if provider.source == "api" || provider.usesOAuth {
+                        Button("Remove") {
+                            Task { await client.removeAuth(for: provider.id) }
+                        }
+                        .help("Remove the credentials stored in opencode")
+                    }
+                }
+            }
+        } header: {
+            Text("Connected providers")
+        }
+    }
+
+    static func sourceLabel(_ provider: OpencodeProvider) -> String {
+        if provider.usesOAuth { return "Logged in" }
+        switch provider.source {
+        case "api": return "API key"
+        case "env": return "Environment"
+        case "config": return "Config"
+        default: return "Built-in"
+        }
+    }
+
+    // MARK: Connect
+
+    private var connectSection: some View {
+        Section {
+            Picker("Provider", selection: $connectProviderID) {
+                Text("Choose…").tag("")
+                ForEach(client.allProviders.filter { $0.id != OpencodeConfigClient.localProviderID }) { provider in
+                    Text(client.isConnected(provider.id) ? "\(provider.name) ✓" : provider.name)
+                        .tag(provider.id)
+                }
+            }
+            if !connectProviderID.isEmpty {
+                ProviderAuthForm(providerID: connectProviderID, preferOAuth: false)
+                    .id(connectProviderID)
+            }
+        } header: {
+            Text("Add credentials")
+        } footer: {
+            Text("Keys are sent to opencode's credential store (auth.json) and are never saved by this app.")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+    }
+}
+
+// MARK: - Server controls
+
+/// Restart, update and inspect System Two's opencode server (the io.otron.commandspace.opencode
+/// service).
+private struct ServerControls: View {
+    @ObservedObject private var client = OpencodeConfigClient.shared
+    @State private var installed: String?
+    @State private var busy: String?
+    @State private var result: (ok: Bool, text: String)?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Server")
+                Spacer()
+                Text(versionText)
+                    .foregroundStyle(.secondary)
+            }
+            HStack(spacing: 8) {
+                Button("Refresh models") { run("Refreshing models…") { await refresh(); return (true, "Models refreshed") } }
+                Button("Restart") { run("Restarting…") { await restart() } }
+                Button("Update opencode") { run("Updating opencode… this can take a minute") { await update() } }
+                Spacer()
+                Button("Show log") { Task { await SystemBridge.shared.revealOpencodeLog() } }
+                    .buttonStyle(.borderless)
+            }
+            .disabled(busy != nil)
+            if let busy {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text(busy).font(.caption).foregroundStyle(.secondary)
+                }
+            } else if let result {
+                Label(result.text, systemImage: result.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(result.ok ? Color.secondary : Color.orange)
+                    .textSelection(.enabled)
+            }
+        }
+        .task { installed = await SystemBridge.shared.opencodeInstalledVersion() }
+    }
+
+    private var running: String? {
+        if case .healthy(let version) = client.health, !version.isEmpty { return version }
+        return nil
+    }
+
+    private var versionText: String {
+        switch (running, installed) {
+        case let (r?, i?) where r != i: return "opencode \(r) running · \(i) installed, restart to use it"
+        case let (r?, _): return "opencode \(r)"
+        case let (nil, i?): return "opencode \(i) installed · not running"
+        default: return "—"
+        }
+    }
+
+    private func run(_ label: String, _ action: @escaping () async -> (Bool, String)) {
+        busy = label
+        result = nil
+        Task {
+            let (ok, text) = await action()
+            installed = await SystemBridge.shared.opencodeInstalledVersion()
+            result = (ok, text)
+            busy = nil
+        }
+    }
+
+    private func refresh() async {
+        await client.refreshHealth()
+        await client.reload()
+    }
+
+    private func restart() async -> (Bool, String) {
+        let r = await SystemBridge.shared.restartOpencodeServer()
+        guard r.ok else { return (false, r.message) }
+        return await waitForServer(r.message)
+    }
+
+    private func update() async -> (Bool, String) {
+        let r = await SystemBridge.shared.upgradeOpencode()
+        guard r.ok else { return (false, r.message) }
+        return r.message.hasPrefix("Already") ? (true, r.message) : await waitForServer(r.message)
+    }
+
+    /// After a restart: wait until the server answers again, then reload providers and models.
+    private func waitForServer(_ message: String) async -> (Bool, String) {
+        for _ in 0..<40 {
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            await client.refreshHealth()
+            if case .healthy = client.health {
+                await client.reload()
+                return (true, message + " · models reloaded")
+            }
+        }
+        return (false, message + ", but the server didn't come back within 20 s (see the log)")
+    }
+}
+
+// MARK: - Model picker
+
+private struct ModelPickerRow: View {
+    @ObservedObject private var client = OpencodeConfigClient.shared
+    let title: String
+    let model: String
+    let onSelect: (String) -> Void
+
+    @State private var providerID = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker(title, selection: $providerID) {
+                if client.provider(providerID) == nil {
+                    Text(providerID.isEmpty ? "—" : providerID).tag(providerID)
+                }
+                ForEach(client.connected) { provider in
+                    Text(provider.name).tag(provider.id)
+                }
+            }
+            Picker("", selection: modelBinding) {
+                if !currentModelListed {
+                    Text(currentModelID.isEmpty ? "Choose a model…" : currentModelID).tag(currentModelID)
+                }
+                ForEach(client.provider(providerID)?.models ?? []) { model in
+                    Text(model.name).tag(model.id)
+                }
+            }
+            .labelsHidden()
+            .disabled(providerID.isEmpty)
+        }
+        .onAppear { syncProvider() }
+        .onChange(of: model) { _, _ in syncProvider() }
+    }
+
+    /// Model id shown in the second picker: the active one if it belongs to the selected provider.
+    private var currentModelID: String {
+        let (p, m) = OpencodeConfigClient.split(model)
+        return p == providerID ? m : ""
+    }
+
+    private var currentModelListed: Bool {
+        client.provider(providerID)?.models.contains { $0.id == currentModelID } ?? false
+    }
+
+    private var modelBinding: Binding<String> {
+        Binding(
+            get: { currentModelID },
+            set: { newValue in
+                guard !newValue.isEmpty, "\(providerID)/\(newValue)" != model else { return }
+                onSelect("\(providerID)/\(newValue)")
+            }
+        )
+    }
+
+    private func syncProvider() {
+        let current = OpencodeConfigClient.split(model).0
+        if !current.isEmpty { providerID = current }
+    }
+}
+
+// MARK: - Provider authentication
+
+/// Credential entry for one provider: API keys and every OAuth method opencode offers.
+struct ProviderAuthForm: View {
+    @ObservedObject private var client = OpencodeConfigClient.shared
+    let providerID: String
+    let preferOAuth: Bool
+
+    private enum Phase: Equatable {
+        case idle
+        case working
+        case waitingForBrowser(url: String, instructions: String)
+        case needsCode(url: String, instructions: String)
+        case done(String)
+        case failed(String)
+    }
+
+    @State private var methodIndex = -1
+    @State private var inputs: [String: String] = [:]
+    @State private var apiKey = ""
+    @State private var code = ""
+    @State private var phase: Phase = .idle
+    @State private var flowTask: Task<Void, Never>?
+
+    private var methods: [OpencodeAuthMethod] { client.methods(for: providerID) }
+
+    private var method: OpencodeAuthMethod? {
+        methods.first { $0.index == methodIndex } ?? methods.first
+    }
+
+    var body: some View {
+        Group {
+            HStack {
+                Text(client.provider(providerID)?.name ?? providerID)
+                Spacer()
+                if let provider = client.connected.first(where: { $0.id == providerID }) {
+                    customBadge(text: provider.usesOAuth ? "Logged in" : "Connected (\(AgentSettings.sourceLabel(provider)))")
+                } else {
+                    customBadge(text: "Not connected")
+                }
+            }
+
+            if methods.count > 1 {
+                Picker("Method", selection: $methodIndex) {
+                    ForEach(methods, id: \.index) { method in
+                        Text(method.label).tag(method.index)
+                    }
+                }
+                .onChange(of: methodIndex) { _, _ in resetFlow() }
+            }
+
+            if let method {
+                ForEach(method.prompts.filter { $0.isVisible(inputs) }, id: \.key) { prompt in
+                    promptField(prompt)
+                }
+                if method.type == "api" {
+                    SecureField("API key", text: $apiKey)
+                    HStack {
+                        Spacer()
+                        Button("Save key") { saveKey(method) }
+                            .disabled(apiKey.trimmingCharacters(in: .whitespaces).isEmpty || phase == .working)
+                    }
+                } else {
+                    oauthControls(method)
+                }
+            }
+
+            statusView
+        }
+        .onAppear {
+            if methodIndex < 0 {
+                let preferred = preferOAuth ? methods.first { $0.type == "oauth" } : methods.first
+                methodIndex = preferred?.index ?? 0
+            }
+        }
+        .onDisappear { flowTask?.cancel() }
+    }
+
+    @ViewBuilder
+    private func promptField(_ prompt: OpencodeAuthPrompt) -> some View {
+        if prompt.type == "select" {
+            Picker(prompt.message, selection: binding(for: prompt.key, default: prompt.options.first?.value ?? "")) {
+                ForEach(prompt.options, id: \.value) { option in
+                    Text(option.hint.map { "\(option.label) (\($0))" } ?? option.label).tag(option.value)
+                }
+            }
+        } else {
+            TextField(prompt.message, text: binding(for: prompt.key, default: ""), prompt: prompt.placeholder.map { Text($0) })
+        }
+    }
+
+    private func binding(for key: String, default value: String) -> Binding<String> {
+        Binding(
+            get: { inputs[key] ?? value },
+            set: { inputs[key] = $0 }
+        )
+    }
+
+    /// Inputs for visible prompts, including select defaults the user didn't touch.
+    private func resolvedInputs(_ method: OpencodeAuthMethod) -> [String: String] {
+        var result: [String: String] = [:]
+        for prompt in method.prompts where prompt.isVisible(inputs) {
+            let value = inputs[prompt.key] ?? (prompt.type == "select" ? prompt.options.first?.value ?? "" : "")
+            if !value.isEmpty { result[prompt.key] = value }
+        }
+        return result
+    }
+
+    @ViewBuilder
+    private func oauthControls(_ method: OpencodeAuthMethod) -> some View {
+        switch phase {
+        case .waitingForBrowser(let url, let instructions):
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    ProgressView().controlSize(.small)
+                    Text(instructions.isEmpty ? "Waiting for you to finish in the browser…" : instructions)
+                        .textSelection(.enabled)
+                }
+                HStack {
+                    Button("Open login page again") { open(url) }
+                    Spacer()
+                    Button("Cancel") { resetFlow() }
+                }
+            }
+        case .needsCode(let url, let instructions):
+            VStack(alignment: .leading, spacing: 6) {
+                Text(instructions.isEmpty ? "Paste the authorization code from the browser." : instructions)
+                    .textSelection(.enabled)
+                TextField("Authorization code", text: $code)
+                HStack {
+                    Button("Open login page again") { open(url) }
+                    Spacer()
+                    Button("Cancel") { resetFlow() }
+                    Button("Submit") { submitCode(method) }
+                        .disabled(code.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+            }
+        default:
+            HStack {
+                Spacer()
+                Button(method.label.lowercased().hasPrefix("log") ? method.label : "Log in – \(method.label)") {
+                    startOAuth(method)
+                }
+                .disabled(phase == .working)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var statusView: some View {
+        switch phase {
+        case .working:
+            HStack {
+                ProgressView().controlSize(.small)
+                Text("Working…").foregroundStyle(.secondary)
+            }
+        case .done(let message):
+            Label(message, systemImage: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .foregroundStyle(.orange)
+        default:
+            EmptyView()
+        }
+    }
+
+    // MARK: Actions
+
+    private func saveKey(_ method: OpencodeAuthMethod) {
+        let key = apiKey
+        let metadata = resolvedInputs(method)
+        phase = .working
+        Task {
+            let ok = await client.setAPIKey(key, for: providerID, metadata: metadata)
+            apiKey = ""
+            phase = ok ? .done("Key saved") : .failed(client.lastError ?? "Couldn't save the key")
+        }
+    }
+
+    private func startOAuth(_ method: OpencodeAuthMethod) {
+        flowTask?.cancel()
+        let provider = providerID
+        let methodIndex = method.index
+        let inputs = resolvedInputs(method)
+        phase = .working
+        flowTask = Task {
+            do {
+                let auth = try await client.startOAuth(providerID: provider, method: methodIndex, inputs: inputs)
+                open(auth.url)
+                if auth.method == "code" {
+                    phase = .needsCode(url: auth.url, instructions: auth.instructions)
+                    return
+                }
+                phase = .waitingForBrowser(url: auth.url, instructions: auth.instructions)
+                try await client.finishOAuth(providerID: provider, method: methodIndex, code: nil)
+                guard !Task.isCancelled else { return }
+                phase = .done("Logged in")
+            } catch {
+                guard !Task.isCancelled else { return }
+                phase = .failed("Login failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func submitCode(_ method: OpencodeAuthMethod) {
+        let provider = providerID
+        let methodIndex = method.index
+        let value = code
+        phase = .working
+        flowTask = Task {
+            do {
+                try await client.finishOAuth(providerID: provider, method: methodIndex, code: value)
+                code = ""
+                phase = .done("Logged in")
+            } catch {
+                phase = .failed("Login failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    private func resetFlow() {
+        flowTask?.cancel()
+        flowTask = nil
+        code = ""
+        phase = .idle
+    }
+
+    private func open(_ url: String) {
+        if let url = URL(string: url) { NSWorkspace.shared.open(url) }
+    }
+}
+
+// MARK: - System One
+
+/// Which engine answers Command Space’s instant decisions, and how it is doing.
+private struct DecisionEngineSection: View {
+    @Default(.decisionBackend) private var backend
+    @ObservedObject private var store = LayaModelStore.shared
+
+    var body: some View {
+        Section {
+            Picker("Engine", selection: $backend) {
+                Text("Snap 1 — on this Mac").tag(DecisionBackend.local)
+                Text("Jev — TypeSafe, online").tag(DecisionBackend.jev)
+                Text("Compare — Jev decides, Snap 1 logged").tag(DecisionBackend.shadow)
+            }
+            .onChange(of: backend) { _, _ in DecisionEngine.shared.warmUpLaya() }
+            HStack {
+                Text("Status")
+                Spacer()
+                SystemOneStatus()
+            }
+            if backend == .shadow {
+                Button("Show comparison log in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([LayaShadowLog.url])
+                }
+            }
+        } header: {
+            Text("Engine")
+        } footer: {
+            Text(footer)
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+    }
+
+    private var footer: String {
+        switch backend {
+        case .local: "Snap 1 answers on this Mac in a few milliseconds: no key, no network, nothing leaves the device. While it loads, or if it isn't downloaded, Jev is used when a key is saved."
+        case .jev: "Jev answers over the network with your TypeSafe key."
+        case .shadow: "Jev stays in charge; Snap 1 answers the same decisions alongside and both answers are logged on this Mac, to see where they differ."
+        }
+    }
+}
+
+/// One-line health of System One, shared by the overview and the System One page.
+struct SystemOneStatus: View {
+    @Default(.decisionBackend) private var backend
+    @ObservedObject private var store = LayaModelStore.shared
+
+    var body: some View {
+        let (ok, text) = state
+        HStack(spacing: 6) {
+            Circle().fill(ok ? Color.green : Color.orange).frame(width: 8, height: 8)
+            Text(text).foregroundStyle(.secondary)
+        }
+    }
+
+    private var state: (Bool, String) {
+        let hasKey = DecisionEngine.shared.hasJevKey
+        let snapReady: Bool = { if case .installed = store.status { return true } else { return false } }()
+        switch backend {
+        case .jev:
+            return hasKey ? (true, "Jev") : (false, "Jev · no key saved")
+        case .local:
+            if snapReady { return (true, "Snap 1 · on this Mac") }
+            if case .downloading(let f) = store.status { return (false, "Downloading Snap 1 · \(Int(f * 100))%") }
+            return (false, hasKey ? "Snap 1 not downloaded · using Jev" : "Snap 1 not downloaded")
+        case .shadow:
+            if !hasKey { return (false, "Compare needs a Jev key") }
+            return snapReady ? (true, "Jev · comparing with Snap 1") : (false, "Jev · Snap 1 not downloaded")
+        }
+    }
+}
+
+/// The on-device decision model: download, test, remove.
+private struct SnapModelSection: View {
+    @ObservedObject private var store = LayaModelStore.shared
+    @State private var testResult: String?
+    @State private var isTesting = false
+
+    var body: some View {
+        Section {
+            HStack {
+                switch store.status {
+                case .notInstalled:
+                    Text("Not downloaded (about 850 MB)")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Download") { store.install() }
+                case .downloading(let fraction):
+                    ProgressView(value: fraction)
+                    Text("\(Int(fraction * 100))%")
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                    Button("Cancel") { store.cancel() }
+                case .installed(let version):
+                    Text("Downloaded · \(version)")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if isTesting { ProgressView().controlSize(.small) }
+                    Button("Test") {
+                        isTesting = true
+                        testResult = nil
+                        Task {
+                            testResult = await DecisionEngine.shared.testLaya()
+                            isTesting = false
+                        }
+                    }
+                    .disabled(isTesting)
+                    Button("Remove") { store.remove() }
+                case .failed(let message):
+                    Text(message)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                    Spacer()
+                    Button("Retry") { store.install() }
+                }
+            }
+            if let testResult {
+                Text(testResult)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        } header: {
+            Text("Snap 1")
+        } footer: {
+            Text("OTRON's decision model, downloaded once and run with Core ML. Used by Snap 1 and Compare.")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+    }
+}
+
+/// TypeSafe's Jev: key, model, test.
+private struct JevSettingsSection: View {
+    @Default(.jevModel) private var jevModel
+    @State private var key = ""
+    @State private var hasKey = false
+    @State private var saveStatus: String?
+    @State private var testResult: String?
+    @State private var isTesting = false
+
+    var body: some View {
+        Section {
+            HStack {
+                SecureField("API key", text: $key, prompt: Text(hasKey ? "Saved in Keychain" : "Not set"))
+                Button("Save") {
+                    let ok = JevKeychain.save(key)
+                    key = ""
+                    hasKey = JevKeychain.load() != nil
+                    saveStatus = ok ? (hasKey ? "Saved" : "Removed") : "Couldn't save to Keychain"
+                }
+                .disabled(key.trimmingCharacters(in: .whitespaces).isEmpty)
+                if hasKey {
+                    Button("Remove") {
+                        JevKeychain.delete()
+                        hasKey = false
+                        saveStatus = "Removed"
+                    }
+                }
+            }
+            if let saveStatus {
+                Text(saveStatus)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            TextField("Model", text: $jevModel)
+            HStack {
+                if let testResult {
+                    Text(testResult)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                Spacer()
+                if isTesting { ProgressView().controlSize(.small) }
+                Button("Test") {
+                    isTesting = true
+                    testResult = nil
+                    Task {
+                        testResult = await DecisionEngine.shared.testJev()
+                        isTesting = false
+                    }
+                }
+                .disabled(isTesting)
+            }
+        } header: {
+            Text("Jev")
+        } footer: {
+            Text("TypeSafe's hosted decision model. The key is stored in your Keychain. Used by Jev and Compare, and as Snap 1's fallback.")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+        .onAppear { hasKey = JevKeychain.load() != nil }
+    }
+}
+
+/// What System One is allowed to decide, whichever engine answers.
+private struct SystemOneUsesSection: View {
+    var body: some View {
+        Section {
+            Defaults.Toggle(key: .jevInstantActions) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Instant actions")
+                    Text("Run simple requests like “mute” or “play my liked songs” without the agent")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Defaults.Toggle(key: .jevAmbientNudges) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Ambient nudges")
+                    Text("Offer a quick follow-up after downloads, before meetings, on low battery")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Defaults.Toggle(key: .jevSmartSuggestions) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Smart suggestions")
+                    Text("Order the agent's suggested prompts by what fits right now")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Defaults.Toggle(key: .jevDoneCheck) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Done check")
+                    Text("Check whether the agent really finished a task")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        } header: {
+            Text("Uses")
+        }
+    }
+}
+
+// MARK: - Overview
+
+/// The two systems at a glance, on the Agent page.
+private struct SystemsOverviewSection: View {
+    @ObservedObject private var client = OpencodeConfigClient.shared
+
+    var body: some View {
+        Section {
+            overviewRow(icon: "bolt.fill", title: "System One — instant decisions",
+                        detail: "Routes requests, runs instant actions, decides when to nudge. Milliseconds.",
+                        page: .systemOne) { SystemOneStatus() }
+            overviewRow(icon: "brain", title: "System Two — the agent",
+                        detail: "Answers questions and does multi-step work with tools. Seconds.",
+                        page: .systemTwo) { systemTwoStatus }
+        } header: {
+            Text("How it works")
+        } footer: {
+            Text("Every request goes to System One first. Whatever it can't do instantly, it hands to System Two.")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+    }
+
+    private func overviewRow<S: View>(icon: String, title: String, detail: String, page: AgentSettingsPage,
+                                      @ViewBuilder status: () -> S) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .frame(width: 18)
+                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                status().font(.caption)
+            }
+            Spacer()
+            Button("Open") { SetupStatus.openSettings(page) }
+        }
+    }
+
+    @ViewBuilder
+    private var systemTwoStatus: some View {
+        let model = client.activeModel
+        switch client.health {
+        case .healthy:
+            HStack(spacing: 6) {
+                Circle().fill(model.isEmpty ? Color.orange : Color.green).frame(width: 8, height: 8)
+                Text(model.isEmpty ? "No model chosen" : model).foregroundStyle(.secondary)
+            }
+        case .unreachable:
+            HStack(spacing: 6) {
+                Circle().fill(.red).frame(width: 8, height: 8)
+                Text("opencode not running").foregroundStyle(.secondary)
+            }
+        case .unknown:
+            Text("Checking…").foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Push-to-talk settings.
+struct VoiceSettingsSection: View {
+    @Default(.pushToTalkDucking) private var ducking
+
+    var body: some View {
+        Section {
+            PushToTalkKeyPicker()
+            Toggle("Lower music while listening", isOn: $ducking)
+        } header: {
+            Text("Push to talk")
+        } footer: {
+            Text("Hold the key, speak, and release to send. Speech is transcribed on this Mac with Apple's on-device model (macOS 26 or later); audio never leaves the computer. Holding the key together with other keys keeps its normal shortcut behavior.")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+    }
+}
+
+/// Whistle a pattern to start listening hands-free, and record your own pattern.
+struct WhistleSettingsSection: View {
+    @Default(.whistleTrigger) private var enabled
+    @Default(.whistlePattern) private var saved
+    @Default(.whistleCommands) private var commands
+    @ObservedObject private var whistle = WhistleTrigger.shared
+    @State private var newCommand = ""
+
+    var body: some View {
+        Section {
+            Toggle("Listen for whistles", isOn: $enabled)
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Pattern")
+                    Text(saved == nil ? "Default: slide down, then up" : "Your own pattern")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                WhistleContourView(contour: whistle.pattern.takes[0])
+                    .frame(width: 90, height: 28)
+            }
+            if whistle.recordingTarget == .trigger {
+                recordingRow(prompt: "Whistle your listening pattern")
+            } else {
+                HStack {
+                    Button("Record Pattern…") { whistle.beginRecording() }
+                    Button("Use Default") { whistle.useDefaultPattern() }
+                        .disabled(saved == nil)
+                }
+                .disabled(whistle.isRecording)
+            }
+            if whistle.pausedForBluetooth {
+                Label("Paused while a Bluetooth headset is the microphone", systemImage: "headphones")
+                    .foregroundStyle(.secondary)
+            }
+            if let message = whistle.message {
+                Text(message).foregroundStyle(.secondary)
+            }
+            if enabled, !whistle.isRecording, let heard = whistle.lastHeard {
+                Label(
+                    heard.matched
+                        ? (heard.label == "listen" ? "Last whistle: listening pattern" : "Last whistle: “\(heard.label)”")
+                        : "Last whistle didn't match anything",
+                    systemImage: heard.matched ? "checkmark.circle.fill" : "xmark.circle"
+                )
+                .foregroundStyle(heard.matched ? .green : .secondary)
+                .help(String(format: "Difference %.2f (matches up to %.2f)", heard.distance, heard.threshold))
+            }
+        } header: {
+            Text("Whistle to talk")
+        } footer: {
+            Text("Whistle the pattern, wait for the chime, then say what you want, like “mute” or “what's on my calendar”. To record your own, whistle the same short phrase three times; it's matched by its shape, so the key and speed don't need to be exact. While this is on the microphone stays open (the orange dot shows), but only the pitch is measured on this Mac. Nothing is transcribed until a pattern matches. Paused while a Bluetooth headset is the microphone, since opening it lowers its audio quality.")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+
+        Section {
+            ForEach(commands) { command in
+                HStack {
+                    WhistleContourView(contour: command.pattern.takes[0])
+                        .frame(width: 60, height: 22)
+                    Text(command.text)
+                    Spacer()
+                    Button(role: .destructive) {
+                        whistle.deleteCommand(command.id)
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Delete this whistle command")
+                }
+            }
+            if case .command(let text) = whistle.recordingTarget {
+                recordingRow(prompt: "Whistle the pattern for “\(text)”")
+            } else {
+                HStack {
+                    TextField("Command", text: $newCommand, prompt: Text("What it does, e.g. “mute” or “next song”"))
+                        .labelsHidden()
+                        .onSubmit(recordCommand)
+                    Button("Record…", action: recordCommand)
+                        .disabled(newCommand.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
+                .disabled(whistle.isRecording)
+            }
+        } header: {
+            Text("Whistle commands")
+        } footer: {
+            Text("Each command runs as if you'd said it, without whistling the listening pattern first. Instant actions like “mute” run right away; anything else goes to the agent. Patterns must sound different from each other.")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+    }
+
+    private func recordCommand() {
+        let text = newCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        whistle.beginRecording(.command(text))
+        newCommand = ""
+    }
+
+    private func recordingRow(prompt: String) -> some View {
+        HStack {
+            ProgressView().controlSize(.small)
+            Text("\(prompt) (\((whistle.takes?.count ?? 0) + 1) of \(WhistleTrigger.takesNeeded))…")
+            Spacer()
+            ForEach(Array((whistle.takes ?? []).enumerated()), id: \.offset) { _, take in
+                WhistleContourView(contour: take).frame(width: 40, height: 20)
+            }
+            Button("Cancel") { whistle.cancelRecording() }
+        }
+    }
+}
+
+/// A whistle's pitch over time, as a small line.
+struct WhistleContourView: View {
+    let contour: WhistleContour
+
+    var body: some View {
+        Canvas { context, size in
+            let voiced = contour.pitches.compactMap { $0 }
+            guard let low = voiced.min(), let high = voiced.max(), contour.pitches.count > 1 else { return }
+            let span = max(high - low, 3)
+            let mid = (high + low) / 2
+            var path = Path()
+            var drawing = false
+            for (index, pitch) in contour.pitches.enumerated() {
+                guard let pitch else {
+                    drawing = false
+                    continue
+                }
+                let x = size.width * CGFloat(index) / CGFloat(contour.pitches.count - 1)
+                let y = size.height * (0.5 - CGFloat((pitch - mid) / span) * 0.9)
+                if drawing { path.addLine(to: CGPoint(x: x, y: y)) } else { path.move(to: CGPoint(x: x, y: y)) }
+                drawing = true
+            }
+            context.stroke(path, with: .color(.accentColor), style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+        }
+    }
+}
+
+/// Instant actions the agent taught Jev (System 2 → System 1).
+struct LearnedActionsSection: View {
+    @ObservedObject private var learned = LearnedActions.shared
+
+    var body: some View {
+        Section {
+            if learned.actions.isEmpty {
+                Text("None yet. When the agent finishes a task with simple commands, Command Space offers “Make this instant”.")
+                    .foregroundStyle(.secondary)
+            }
+            ForEach(learned.actions) { action in
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(action.title)
+                        Text(action.commands.joined(separator: "  ·  "))
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .help(action.commands.joined(separator: "\n"))
+                    }
+                    Spacer()
+                    Text(action.uses == 1 ? "used once" : "used \(action.uses)×")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button(role: .destructive) { learned.delete(action) } label: { Image(systemName: "trash") }
+                        .buttonStyle(.borderless)
+                }
+            }
+        } header: {
+            Text("Learned actions")
+        } footer: {
+            Text("Learned actions replay their commands directly, without the AI model and without asking again. Destructive commands (rm, sudo, kill, overwriting files, …) are never offered.")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+    }
+}
