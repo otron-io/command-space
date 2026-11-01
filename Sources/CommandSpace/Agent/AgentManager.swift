@@ -2,12 +2,13 @@
 //  AgentManager.swift
 //  Command Space
 //
-//  System Two: talks to a local `opencode serve` instance (the agent harness) over HTTP + SSE.
+//  System Two: the agent, running on one of several harnesses (opencode, Codex, Claude Code;
+//  see Harness.swift and the *Backend files).
 //
-//  Conversations are threads. Each `AgentThread` is one opencode session (created on its first
-//  agent turn) with its own transcript, approvals and live activity. `AgentManager` owns the
-//  connection, routes the server's event stream to the right thread, and decides which thread
-//  a new request belongs to:
+//  Conversations are threads. Each `AgentThread` is one harness session (created on its first
+//  agent turn) with its own transcript, approvals and live activity, and it stays on the harness
+//  it started on. `AgentManager` owns the backends, routes their events to the right thread, and
+//  decides which thread a new request belongs to:
 //    • opening Command Space, ⌥Space, push-to-talk and whistles start a new thread,
 //    • typing into an open conversation (panel or window) continues it,
 //    • once System Two has answered in a thread, follow-ups skip System One and go to the agent.
@@ -116,16 +117,17 @@ enum AgentConnection: Equatable {
     case offline(String)
 }
 
-/// A past or present conversation, as listed by the server.
+/// A past or present conversation, as listed by its harness.
 struct AgentSessionSummary: Identifiable, Equatable {
     let id: String
+    let harness: SystemTwoHarness
     var title: String
     let created: Date
     var updated: Date
 
     /// opencode names threads it never titled "New session - <timestamp>".
     var displayTitle: String {
-        if title.isEmpty || title.hasPrefix("New session") {
+        if title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || title.hasPrefix("New session") {
             return "Untitled conversation · " + created.formatted(.dateTime.month(.abbreviated).day())
         }
         return title
@@ -138,8 +140,10 @@ struct AgentSessionSummary: Identifiable, Equatable {
 final class AgentThread: ObservableObject, Identifiable {
     nonisolated let id = UUID()
 
-    /// The opencode session; empty until the first request that goes to the agent.
+    /// The harness session; empty until the first request that goes to the agent.
     @Published private(set) var sessionID: String
+    /// The harness this conversation runs on. Fixed once it has a session.
+    @Published private(set) var harness: SystemTwoHarness
     @Published private(set) var items: [AgentItem] = []
     @Published private(set) var permissions: [AgentPermission] = []
     @Published private(set) var isBusy = false {
@@ -163,7 +167,6 @@ final class AgentThread: ObservableObject, Identifiable {
     /// "Make this instant?" offer for the last finished task (System 2 teaches System 1).
     @Published private(set) var learnOffer: LearnCandidate?
 
-    private var roles: [String: String] = [:]  // messageID -> role
     private var taskToolIDs: Set<String> = []
     private var taskGenTokens = 0
     private var taskGenSeconds: Double = 0
@@ -173,9 +176,11 @@ final class AgentThread: ObservableObject, Identifiable {
     private(set) var lastActivityAt = Date()
 
     private var manager: AgentManager { .shared }
+    private var backend: AgentBackend { manager.backend(harness) }
 
-    init(sessionID: String = "", title: String = "") {
+    init(sessionID: String = "", harness: SystemTwoHarness? = nil, title: String = "") {
         self.sessionID = sessionID
+        self.harness = harness ?? Defaults[.systemTwoHarness]
         self.title = title
     }
 
@@ -218,30 +223,28 @@ final class AgentThread: ObservableObject, Identifiable {
                 }
             }
             showResultWhenDone = showResult
+            items.append(AgentItem(id: UUID().uuidString, kind: .user, text: trimmed))
             do {
                 if sessionID.isEmpty {
-                    sessionID = try await manager.createSession()
+                    // A fresh conversation goes to the harness chosen in Settings right now.
+                    harness = Defaults[.systemTwoHarness]
+                    isBusy = true
+                    sessionID = try await backend.createSession()
                     manager.register(self)
                 }
                 isBusy = true
-                var parts: [[String: Any]] = [["type": "text", "text": trimmed]]
-                // "Summarize this", "move these": give the agent what the user is looking at.
-                // Sent as a hidden (synthetic) part so the chat shows only what was said.
+                // "Summarize this", "move these": give the agent what the user is looking at,
+                // sent so the chat shows only what was said.
+                var context: String?
                 let refers = QuickActions.shared.lastThisRefers
                 if let screen = await ContextCapture.shared.context(maxWait: 0.3), screen.hasReferent,
                    (refers != nil && refers != "none") || (refers == nil && RequestParsing.mentionsOnScreen(trimmed)) {
-                    parts.insert(["type": "text", "text": screen.promptBlock(focus: refers), "synthetic": true], at: 0)
+                    context = screen.promptBlock(focus: refers)
                 }
-                var body: [String: Any] = ["parts": parts]
-                let override = Defaults[.agentModelOverride]
-                if let slash = override.firstIndex(of: "/") {
-                    body["model"] = ["providerID": String(override[..<slash]),
-                                     "modelID": String(override[override.index(after: slash)...])]
-                }
-                _ = try await manager.request("POST", "/session/\(sessionID)/prompt_async", body: body)
+                try await backend.send(trimmed, context: context, to: sessionID)
             } catch {
                 isBusy = false
-                appendError("Couldn't reach the agent: \(error.localizedDescription)")
+                appendError("Couldn't reach \(harness.name): \(error.localizedDescription)")
                 if showResult { showResultWhenDone = false; manager.announceResult(of: self, dwell: 6) }
             }
         }
@@ -249,16 +252,14 @@ final class AgentThread: ObservableObject, Identifiable {
 
     func abort() {
         guard !sessionID.isEmpty else { return }
-        Task { _ = try? await manager.request("POST", "/session/\(sessionID)/abort") }
+        backend.abort(sessionID)
     }
 
     /// reply: "once", "always" or "reject"
     func reply(to permission: AgentPermission, with reply: String) {
         permissions.removeAll { $0.id == permission.id }
         manager.permissionsChanged()
-        Task {
-            _ = try? await manager.request("POST", "/permission/\(permission.id)/reply", body: ["reply": reply])
-        }
+        backend.reply(to: permission, with: PermissionReply(rawValue: reply) ?? .reject)
     }
 
     func command(for permission: AgentPermission) -> String {
@@ -299,6 +300,8 @@ final class AgentThread: ObservableObject, Identifiable {
         taskGenSeconds = 0
         lastCountedRun = Date().timeIntervalSince1970 * 1000
         statusTask?.cancel()
+        // Live prefill/generation progress only exists for the local model behind opencode.
+        guard harness == .opencode else { return }
         statusTask = Task { [weak self] in
             while !Task.isCancelled {
                 await self?.pollModelStatus()
@@ -311,7 +314,7 @@ final class AgentThread: ObservableObject, Identifiable {
         lastActivityAt = Date()
         statusTask?.cancel()
         statusTask = nil
-        Task { await pollModelStatus() }  // pick up the final generation stats
+        if harness == .opencode { Task { await pollModelStatus() } }  // pick up the final generation stats
         if let started = taskStartedAt,
            let last = items.last(where: { $0.kind == .assistant }) {
             runSummaries[last.id] = AgentRunSummary(
@@ -391,153 +394,63 @@ final class AgentThread: ObservableObject, Identifiable {
         if isBusy { modelStatus = status }
     }
 
-    // MARK: Server state
+    // MARK: Harness state
 
-    /// Rebuilds the transcript, approvals and busy state from the server.
+    /// Rebuilds the transcript, approvals and busy state from the harness.
     func load() async {
         guard !sessionID.isEmpty else { return }
         isLoading = items.isEmpty
         defer { isLoading = false }
-        if let data = try? await manager.request("GET", "/session/\(sessionID)/message"),
-           let messages = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            var rebuilt: [AgentItem] = []
-            roles = [:]
-            for message in messages {
-                guard let info = message["info"] as? [String: Any],
-                      let mid = info["id"] as? String else { continue }
-                roles[mid] = info["role"] as? String
-                for part in message["parts"] as? [[String: Any]] ?? [] {
-                    if let item = makeItem(from: part) { rebuilt.append(item) }
-                }
-            }
-            // Keep instant-action rows that only ever lived on this Mac.
-            let local = items.filter { if case .quick = $0.kind { return true }; return false }
-            items = local.isEmpty ? rebuilt : rebuilt + local
+        guard let snapshot = await backend.snapshot(of: sessionID) else { return }
+        // A request sent while loading is newer than what the harness returned.
+        if isBusy, !snapshot.busy, items.count > snapshot.items.count { return }
+        // Keep instant-action rows that only ever lived on this Mac.
+        let local = items.filter { if case .quick = $0.kind { return true }; return false }
+        if !snapshot.items.isEmpty || items.allSatisfy({ if case .quick = $0.kind { return true }; return false }) {
+            items = local.isEmpty ? snapshot.items : snapshot.items + local
         }
-        if let data = try? await manager.request("GET", "/permission"),
-           let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            permissions = list.compactMap(Self.makePermission).filter { $0.sessionID == sessionID }
-        }
-        if let data = try? await manager.request("GET", "/session/status"),
-           let statuses = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            let mine = statuses[sessionID] as? [String: Any]
-            isBusy = (mine?["type"] as? String) == "busy"
-        }
+        permissions = snapshot.permissions
+        isBusy = snapshot.busy
+        if let title = snapshot.title, !title.isEmpty { self.title = title }
         manager.permissionsChanged()
     }
 
-    func handle(type: String, props: [String: Any]) {
-        switch type {
-        case "message.updated":
-            if let info = props["info"] as? [String: Any], let id = info["id"] as? String {
-                roles[id] = info["role"] as? String
-                if let error = info["error"] as? [String: Any] {
-                    let data = error["data"] as? [String: Any]
-                    let message = data?["message"] as? String ?? error["name"] as? String ?? "Unknown error"
-                    if (error["name"] as? String) != "MessageAbortedError" { appendError(message) }
-                }
+    func handle(_ event: AgentEvent) {
+        switch event {
+        case .item(let item):
+            if case .tool(_, let status) = item.kind {
+                if isBusy { taskToolIDs.insert(item.id) }
+                if status == "running", toolStartedAt[item.id] == nil { toolStartedAt[item.id] = Date() }
             }
-        case "message.part.updated":
-            guard let part = props["part"] as? [String: Any] else { return }
-            if part["type"] as? String == "step-start", isBusy { stepCount += 1 }
-            if let item = makeItem(from: part) {
-                if case .tool(_, let status) = item.kind {
-                    if isBusy { taskToolIDs.insert(item.id) }
-                    if status == "running", toolStartedAt[item.id] == nil { toolStartedAt[item.id] = Date() }
-                }
-                upsert(item)
-            }
-        case "message.part.delta":
-            guard (props["field"] as? String) == "text",
-                  let partID = props["partID"] as? String,
-                  let delta = props["delta"] as? String else { return }
-            if let index = items.firstIndex(where: { $0.id == partID }) {
-                items[index].text += delta
+            upsert(item)
+        case .delta(let id, let text):
+            if let index = items.firstIndex(where: { $0.id == id }) {
+                items[index].text += text
             } else {
-                let role = roles[props["messageID"] as? String ?? ""]
-                items.append(AgentItem(id: partID, kind: role == "user" ? .user : .assistant, text: delta))
+                items.append(AgentItem(id: id, kind: .assistant, text: text))
             }
-        case "session.status":
-            let info = props["status"] as? [String: Any]
-            let status = info?["type"] as? String
-            isBusy = status == "busy" || status == "retry"
-            if status == "retry" {
-                let next = (info?["next"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) }
-                retry = AgentRetry(attempt: info?["attempt"] as? Int ?? 1,
-                                   message: info?["message"] as? String ?? "Retrying", next: next)
-            } else {
-                retry = nil
-            }
-        case "session.idle":
-            isBusy = false
-        case "session.updated":
-            if let info = props["info"] as? [String: Any], let title = info["title"] as? String {
-                self.title = title
-            }
-        case "session.error":
-            if let error = props["error"] as? [String: Any], (error["name"] as? String) != "MessageAbortedError" {
-                let data = error["data"] as? [String: Any]
-                if (error["name"] as? String)?.contains("ModelNotFound") == true {
-                    appendError("The model “\(Defaults[.agentModelOverride])” isn't available. Choose another in Settings → System Two.")
-                } else {
-                    appendError(data?["message"] as? String ?? error["name"] as? String ?? "Agent error")
-                }
-                isBusy = false
-            }
-        case "permission.asked":
-            if let permission = Self.makePermission(props), !permissions.contains(where: { $0.id == permission.id }) {
-                permissions.append(permission)
-                SpaceMarkEvents.fire(.attention)
-                manager.permissionAsked(in: self)
-            }
-        case "permission.replied":
-            if let requestID = props["requestID"] as? String {
-                permissions.removeAll { $0.id == requestID }
-                manager.permissionsChanged()
-            }
-        default:
-            break
+        case .busy(let busy):
+            isBusy = busy
+        case .retry(let retry):
+            self.retry = retry
+        case .step:
+            if isBusy { stepCount += 1 }
+        case .title(let title):
+            self.title = title
+        case .error(let message):
+            appendError(message)
+        case .permission(let permission):
+            guard !permissions.contains(where: { $0.id == permission.id }) else { return }
+            permissions.append(permission)
+            SpaceMarkEvents.fire(.attention)
+            manager.permissionAsked(in: self)
+        case .permissionResolved(let id):
+            permissions.removeAll { $0.id == id }
+            manager.permissionsChanged()
+        case .generated(let tokens, let seconds):
+            taskGenTokens += tokens
+            if let seconds, seconds > 0 { taskGenSeconds += seconds }
         }
-    }
-
-    private func makeItem(from part: [String: Any]) -> AgentItem? {
-        guard let id = part["id"] as? String, let type = part["type"] as? String else { return nil }
-        let role = roles[part["messageID"] as? String ?? ""]
-        switch type {
-        case "text":
-            if part["synthetic"] as? Bool == true { return nil }
-            let text = part["text"] as? String ?? ""
-            return AgentItem(id: id, kind: role == "user" ? .user : .assistant, text: text)
-        case "tool":
-            let tool = part["tool"] as? String ?? "tool"
-            let state = part["state"] as? [String: Any] ?? [:]
-            let status = state["status"] as? String ?? "pending"
-            let input = state["input"] as? [String: Any] ?? [:]
-            var summary = (input["command"] as? String)
-                ?? (input["filePath"] as? String)
-                ?? (input["url"] as? String)
-                ?? (input["pattern"] as? String)
-                ?? (state["title"] as? String)
-                ?? ""
-            if status == "error", let error = state["error"] as? String {
-                summary += summary.isEmpty ? error : "\n" + (error.components(separatedBy: "\n").first ?? error)
-            }
-            return AgentItem(id: id, kind: .tool(name: tool, status: status), text: summary,
-                             callID: part["callID"] as? String)
-        default:
-            return nil
-        }
-    }
-
-    static func makePermission(_ props: [String: Any]) -> AgentPermission? {
-        guard let id = props["id"] as? String, let session = props["sessionID"] as? String else { return nil }
-        return AgentPermission(
-            id: id,
-            sessionID: session,
-            permission: props["permission"] as? String ?? "action",
-            patterns: props["patterns"] as? [String] ?? [],
-            callID: (props["tool"] as? [String: Any])?["callID"] as? String
-        )
     }
 
     private func upsert(_ item: AgentItem) {
@@ -566,31 +479,112 @@ final class AgentManager: ObservableObject {
     @Published private(set) var current = AgentThread() {
         didSet { observeCurrent() }
     }
-    @Published private(set) var connection: AgentConnection = .connecting
-    @Published private(set) var modelState: AgentModelState = .unknown
-    /// Past conversations on the server, most recent first.
+    /// Past conversations on every harness, most recent first.
     @Published private(set) var sessions: [AgentSessionSummary] = []
     /// Brief result of an instant action, shown in the live pill.
     @Published private(set) var quickResult: (id: UUID, icon: String, label: String)?
     /// True while a spoken request is being routed (keeps the listening strip up, avoiding a flicker).
     @Published private(set) var isRoutingVoice = false
 
-    /// Threads with a session, so server events can find them.
+    /// Threads with a session, so harness events can find them.
     private var threads: [String: AgentThread] = [:]
+    private var backends: [SystemTwoHarness: AgentBackend] = [:]
+    private var lastConnection: [SystemTwoHarness: AgentConnection] = [:]
     private var quickResultTask: Task<Void, Never>?
-    private var eventTask: Task<Void, Never>?
     private var holdingPanel = false
-
-    private var baseURL: URL { URL(string: Defaults[.agentServerURL]) ?? URL(string: "http://127.0.0.1:4096")! }
+    private var harnessObserver: Defaults.Observation?
 
     private init() {
+        AgentBackendSink.event = { [weak self] harness, session, event in
+            self?.deliver(event, to: session, from: harness)
+        }
+        AgentBackendSink.changed = { [weak self] harness in self?.backendChanged(harness) }
         observeCurrent()
+        harnessObserver = Defaults.observe(.systemTwoHarness, options: []) { [weak self] change in
+            Task { @MainActor in self?.harnessSelected(change.newValue) }
+        }
         start()
     }
 
     func start() {
-        guard eventTask == nil else { return }
-        eventTask = Task { [weak self] in await self?.runEventLoop() }
+        backend(activeHarness).start()
+        // opencode keeps serving its old conversations even when another harness is chosen.
+        backend(.opencode).start()
+        Task { await refreshSessions() }
+    }
+
+    // MARK: Harnesses
+
+    var activeHarness: SystemTwoHarness { Defaults[.systemTwoHarness] }
+
+    /// The harness new conversations go to.
+    var activeBackend: AgentBackend { backend(activeHarness) }
+    var connection: AgentConnection { activeBackend.connection }
+    var modelState: AgentModelState { activeBackend.modelState }
+
+    func backend(_ harness: SystemTwoHarness) -> AgentBackend {
+        if let existing = backends[harness] { return existing }
+        let made: AgentBackend
+        switch harness {
+        case .opencode: made = OpencodeBackend()
+        case .codex: made = CodexBackend()
+        case .claudeCode: made = ClaudeBackend()
+        }
+        backends[harness] = made
+        made.start()
+        return made
+    }
+
+    var codexModels: [(id: String, name: String)] { (backends[.codex] as? CodexBackend)?.models ?? [] }
+
+    /// Whether a harness still has a reason to run: it's selected, or a live conversation uses it.
+    func wants(_ harness: SystemTwoHarness) -> Bool {
+        activeHarness == harness || liveThreads.contains { $0.harness == harness && !$0.sessionID.isEmpty }
+    }
+
+    private func harnessSelected(_ harness: SystemTwoHarness) {
+        backend(harness).start()
+        backend(harness).refreshModelState()
+        // An empty conversation in the panel switches with the setting.
+        if current.isEmpty { current = AgentThread() }
+        // Stop a CLI nobody uses any more (opencode is a separate service, left alone).
+        for (other, backend) in backends where other != harness && other != .opencode && !wants(other) {
+            backend.stop()
+        }
+        objectWillChange.send()
+        Task { await refreshSessions() }
+    }
+
+    /// Restart a harness so it picks up changed settings (a different model, a new login).
+    func restart(_ harness: SystemTwoHarness) {
+        guard let backend = backends[harness] else { return }
+        backend.stop()
+        backend.start()
+    }
+
+    private func backendChanged(_ harness: SystemTwoHarness) {
+        objectWillChange.send()
+        guard let backend = backends[harness] else { return }
+        let connection = backend.connection
+        defer { lastConnection[harness] = connection }
+        // Back online: catch up on what happened while we weren't listening.
+        if connection == .connected, lastConnection[harness] != .connected {
+            Task {
+                await refreshSessions()
+                for thread in liveThreads where thread.harness == harness && !thread.sessionID.isEmpty {
+                    await thread.load()
+                }
+            }
+        }
+    }
+
+    private func deliver(_ event: AgentEvent, to session: String, from harness: SystemTwoHarness) {
+        if case .title(let title) = event, let index = sessions.firstIndex(where: { $0.id == session }) {
+            sessions[index].title = title
+            sessions[index].updated = Date()
+        }
+        guard let thread = threads[session], thread.harness == harness else { return }
+        thread.handle(event)
     }
 
     // MARK: The current thread (what the panel shows)
@@ -646,13 +640,14 @@ final class AgentManager: ObservableObject {
         current = thread
     }
 
-    /// The live thread for a session, or one loaded from the server.
+    /// The live thread for a session, or one loaded from its harness.
     func thread(forSession id: String) -> AgentThread {
         if let existing = threads[id] { return existing }
-        let title = sessions.first { $0.id == id }?.title ?? ""
-        let thread = AgentThread(sessionID: id, title: title)
+        let summary = sessions.first { $0.id == id }
+        let thread = AgentThread(sessionID: id, harness: summary?.harness ?? activeHarness, title: summary?.title ?? "")
         threads[id] = thread
         observe(thread)
+        backend(thread.harness).start()
         Task { await thread.load() }
         return thread
     }
@@ -757,120 +752,30 @@ final class AgentManager: ObservableObject {
 
     // MARK: Model
 
-    /// Asks llama-server (through the proxy) whether the model is loaded.
     func refreshModelState() {
-        let override = Defaults[.agentModelOverride]
-        if let slash = override.firstIndex(of: "/"), override[..<slash] != "local" {
-            modelState = .cloud(provider: String(override[..<slash]), model: String(override[override.index(after: slash)...]))
-            return
-        }
-        Task {
-            guard let url = URL(string: Defaults[.agentModelURL] + "/props") else { return }
-            var req = URLRequest(url: url)
-            req.timeoutInterval = 3
-            guard let (data, _) = try? await URLSession.shared.data(for: req),
-                  let props = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                modelState = .unreachable
-                return
-            }
-            let name = (props["model_alias"] as? String) ?? "Local model"
-            modelState = (props["is_sleeping"] as? Bool) == true ? .asleep(name) : .ready(name)
-        }
+        activeBackend.refreshModelState()
     }
 
     // MARK: Sessions
 
-    func createSession() async throws -> String {
-        let data = try await request("POST", "/session", body: [String: Any]())
-        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let id = obj["id"] as? String else { throw URLError(.cannotParseResponse) }
-        return id
-    }
-
     func refreshSessions() async {
-        guard let data = try? await request("GET", "/session"),
-              let list = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return }
-        sessions = list.compactMap { info -> AgentSessionSummary? in
-            guard let id = info["id"] as? String, info["parentID"] == nil else { return nil }
-            let time = info["time"] as? [String: Any]
-            let created = (time?["created"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) } ?? .distantPast
-            let updated = (time?["updated"] as? Double).map { Date(timeIntervalSince1970: $0 / 1000) } ?? created
-            return AgentSessionSummary(id: id, title: info["title"] as? String ?? "", created: created, updated: updated)
+        // Claude Code's history is files on disk, so it's listed even when it isn't selected;
+        // Codex is only asked once it's running (listing would start it).
+        var all: [AgentSessionSummary] = []
+        for (harness, backend) in backends {
+            if harness == .codex, backend.connection != .connected { continue }
+            all += await backend.listSessions()
         }
-        .sorted { $0.updated > $1.updated }
+        if backends[.claudeCode] == nil { all += await ClaudeBackend.history() }
+        sessions = all.sorted { $0.updated > $1.updated }
     }
 
     func deleteSession(_ id: String) {
+        guard let summary = sessions.first(where: { $0.id == id }) else { return }
         Task {
-            _ = try? await request("DELETE", "/session/\(id)")
+            await backend(summary.harness).delete(id)
             threads[id] = nil
             sessions.removeAll { $0.id == id }
         }
-    }
-
-    // MARK: Events
-
-    private func runEventLoop() async {
-        var delay: UInt64 = 1
-        while !Task.isCancelled {
-            connection = .connecting
-            do {
-                var req = URLRequest(url: baseURL.appendingPathComponent("event"))
-                req.timeoutInterval = .infinity
-                req.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-                let (bytes, response) = try await URLSession.shared.bytes(for: req)
-                guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-                connection = .connected
-                delay = 1
-                await refreshSessions()
-                for thread in liveThreads where !thread.sessionID.isEmpty { await thread.load() }
-                for try await line in bytes.lines {
-                    guard line.hasPrefix("data:") else { continue }
-                    let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-                    guard let data = payload.data(using: .utf8),
-                          let event = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-                    dispatch(event)
-                }
-                throw URLError(.networkConnectionLost)
-            } catch {
-                connection = .offline("Agent offline – is opencode serve running on \(baseURL.host ?? ""):\(baseURL.port ?? 0)?")
-                try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
-                delay = min(delay * 2, 15)
-            }
-        }
-    }
-
-    private func dispatch(_ event: [String: Any]) {
-        guard let type = event["type"] as? String,
-              let props = event["properties"] as? [String: Any] else { return }
-        let sessionID = (props["sessionID"] as? String)
-            ?? ((props["part"] as? [String: Any])?["sessionID"] as? String)
-            ?? ((props["info"] as? [String: Any])?["sessionID"] as? String)
-            ?? (type.hasPrefix("session.") ? (props["info"] as? [String: Any])?["id"] as? String : nil)
-        if type == "session.updated", let info = props["info"] as? [String: Any], let id = info["id"] as? String,
-           let index = sessions.firstIndex(where: { $0.id == id }) {
-            sessions[index].title = info["title"] as? String ?? sessions[index].title
-            sessions[index].updated = Date()
-        }
-        guard let sessionID, let thread = threads[sessionID] else { return }
-        thread.handle(type: type, props: props)
-    }
-
-    // MARK: - HTTP
-
-    @discardableResult
-    func request(_ method: String, _ path: String, body: Any? = nil) async throws -> Data {
-        var req = URLRequest(url: URL(string: baseURL.absoluteString + path)!)
-        req.httpMethod = method
-        req.timeoutInterval = 15
-        if let body {
-            req.httpBody = try JSONSerialization.data(withJSONObject: body)
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
-        let (data, response) = try await URLSession.shared.data(for: req)
-        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            throw URLError(.badServerResponse)
-        }
-        return data
     }
 }

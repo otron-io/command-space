@@ -49,6 +49,14 @@ final class SetupStatus: ObservableObject {
         ownsCommandSpace = !SpotlightShortcut.isEnabled
         accessibility = await SystemBridge.shared.isAccessibilityAuthorized()
 
+        let harness = Defaults[.systemTwoHarness]
+        if harness != .opencode {
+            await HarnessDetector.shared.refresh()
+            let status = HarnessDetector.shared.status(harness)
+            agentRunning = status.ready
+            modelName = status.ready ? (status.account ?? harness.accountName) : nil
+            return
+        }
         let client = OpencodeConfigClient.shared
         await client.refreshHealth()
         if case .healthy = client.health {
@@ -111,7 +119,17 @@ struct SetupChecklist: View {
 
     var groups: [Group] = [.shortcut, .permissions, .agent, .extras]
     @ObservedObject private var status = SetupStatus.shared
+    @ObservedObject private var detector = HarnessDetector.shared
+    @Default(.systemTwoHarness) private var harness
     @State private var copied = false
+
+    private func harnessDetail(_ detected: HarnessStatus) -> String {
+        guard detected.installed else { return "Not installed. \(harness.installHint)" }
+        if detected.usesAPIKey { return "Signed in with an API key. Sign in with your \(harness.accountName) plan instead." }
+        if detected.loggedIn == false { return "Installed, not signed in" }
+        let version = detected.version.map { " \($0)" } ?? ""
+        return "\(harness.name)\(version) · \(detected.account ?? harness.accountName) subscription"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -122,7 +140,18 @@ struct SetupChecklist: View {
                     Button("Use for Command Space") { status.takeOverCommandSpace() }
                 }
             }
-            if groups.contains(.agent) {
+            if groups.contains(.agent), harness != .opencode {
+                let detected = HarnessDetector.shared.status(harness)
+                row(icon: harness.icon, title: harness.name,
+                    detail: harnessDetail(detected),
+                    state: status.agentRunning.map { $0 ? .ok : .missing } ?? .checking) {
+                    if detected.installed, let login = harness.loginCommand {
+                        Button("Sign in…") { HarnessLogin.open(login) }
+                    } else {
+                        Button("Choose…") { SetupStatus.openSettings(.systemTwo) }
+                    }
+                }
+            } else if groups.contains(.agent) {
                 row(icon: "server.rack", title: "Background agent",
                     detail: status.agentRunning == false ? "Not running. Run the setup command in Terminal." : "opencode is running",
                     state: status.agentRunning.map { $0 ? .ok : .missing } ?? .checking) {

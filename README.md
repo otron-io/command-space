@@ -41,7 +41,17 @@ Old threads are in the **conversations window**: press ⌘Y in the panel, or use
 - **It ranks search.** As you type, it reads the query and the top matches and decides whether you want an app, a document, a quick open, a command, a web search or the agent. Its pick gets a ✦, and the footer shows what it decided and how long it took. App and file names never leave the Mac.
 - **It runs commands.** "Volume 40", "next song", "remind me to call mom at 6", "timer 10 minutes", "play my gym playlist" and the front app's menu commands run in a blink, with no LLM involved. [Jev](https://typesafe.ai), TypeSafe's hosted equivalent, works too.
 
-**System Two** is the agent: [opencode](https://opencode.ai) running in the background, using ChatGPT, an API key, or a local model. Every shell command or file edit asks for your approval first. When a task finishes using simple commands, Command Space offers **Make this instant**. After that, System One replays it directly, and it appears in search as a learned command.
+**System Two** is the agent. It runs on the harness you pick in **Settings → System Two**:
+
+| Harness | Billing | Notes |
+|---|---|---|
+| [opencode](https://opencode.ai) | ChatGPT login, an API key, or a local model | Runs as a background service (see Install). |
+| [Codex](https://github.com/openai/codex) | Your **ChatGPT** plan, from `codex login` | Command Space drives `codex app-server`. Commands Codex knows are read-only run straight away. |
+| [Claude Code](https://claude.com/claude-code) | Your **Claude** plan, from logging in to `claude` | Command Space drives `claude` in its SDK streaming mode, one process per conversation. |
+
+Command Space finds the Codex and Claude Code CLIs on its own and shows whether each is signed in. It never stores a key for them. It also removes `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`-style variables before launching them, and it won't run either CLI while it's signed in with an API key. New conversations use the selected harness, and existing ones stay on the harness they started on. Conversation history lists all of them.
+
+Every shell command or file edit with side effects asks for your approval first. When a task finishes using simple commands, Command Space offers **Make this instant**. After that, System One replays it directly, and it appears in search as a learned command.
 
 **It knows what "this" is.** Command Space never takes focus from your app, so when you ask about "this", it reads your selection, the selected Finder files, the browser page and the window you were in.
 
@@ -59,7 +69,7 @@ Old threads are in the **conversations window**: press ⌘Y in the panel, or use
    xattr -dr com.apple.quarantine "/Applications/Command Space.app"
    ```
    New versions install themselves (Sparkle).
-2. Set up System Two (installs opencode and a login service; retires Notch Agent's service if present):
+2. Set up System Two. To use **Codex** or **Claude Code**, install and sign in to that CLI, then pick it in **Settings → System Two**; nothing else is needed. For **opencode**, run this (it installs opencode and a login service, and retires Notch Agent's service if present):
    ```sh
    curl -fsSL https://raw.githubusercontent.com/otron-io/command-space/main/agent/setup.sh | zsh
    ```
@@ -75,7 +85,7 @@ Requires macOS 14+. Voice input needs macOS 26+.
 - **Search** runs on this Mac: Spotlight's index, the app list, and Snap 1.
 - **Speech** is transcribed on-device. Audio never leaves the computer.
 - **Jev** (if you use it instead of Snap 1) sees requests and coarse context, never your selected text, file contents or file names.
-- **The agent** sees what you ask and, for "this" requests, what you were looking at. It goes only to the model you chose.
+- **The agent** sees what you ask and, for "this" requests, what you were looking at. It goes only to the model you chose. With Codex or Claude Code, conversations are stored in that CLI's own history (`~/.codex`, `~/.claude`).
 
 ## Development
 
@@ -94,7 +104,7 @@ The app is a SwiftPM package. `build-app.sh` builds it with `xcodebuild` so pack
 Layout:
 - `Panel/`: the bubble, results, and live pill
 - `Search/`: apps, files, quick opens, the calculator, usage learning, and Snap 1 ranking
-- `Agent/`: System One and System Two, carried over from Notch Agent
+- `Agent/`: System One and System Two, carried over from Notch Agent. `AgentBackend.swift` is the harness contract; `OpencodeBackend`, `CodexBackend` and `ClaudeBackend` implement it. Run `CommandSpace --harness-check codex` (or `claudeCode`, `opencode`) to test a harness end to end without UI.
 - `Settings/`
 - `System/`: volume, brightness, media, calendar, battery
 

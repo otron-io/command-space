@@ -112,7 +112,7 @@ struct AgentWelcomeView: View {
         case .connecting:
             return "Connecting to the agent…"
         case .offline:
-            return "Agent offline"
+            return "\(agent.activeHarness.name) offline"
         case .connected:
             switch agent.modelState {
             case .ready(let name): return "\(name) is ready · what should I do?"
@@ -130,6 +130,8 @@ struct AgentWelcomeView: View {
         case "anthropic": return "Anthropic"
         case "google": return "Google"
         case "openrouter": return "OpenRouter"
+        case "chatgpt": return "your ChatGPT plan"
+        case "claude": return "your Claude plan"
         case "groq": return "Groq"
         default: return id.capitalized
         }
@@ -150,7 +152,41 @@ struct AgentWelcomeView: View {
 
     // MARK: Offline
 
+    @ViewBuilder
     private var offlineCard: some View {
+        if agent.activeHarness == .opencode {
+            opencodeOfflineCard
+        } else {
+            harnessOfflineCard
+        }
+    }
+
+    /// Codex / Claude Code: say what's wrong (not installed, not signed in) and how to fix it.
+    private var harnessOfflineCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text(offlineReason)
+                .font(.system(size: 10.5))
+                .foregroundStyle(.gray)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                if let login = agent.activeHarness.loginCommand {
+                    Button("Sign in in Terminal") { HarnessLogin.open(login) }
+                }
+                Button("Try again") { agent.restart(agent.activeHarness) }
+                Button("Settings…") { SetupStatus.openSettings(.systemTwo) }
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 10.5, weight: .medium))
+            .foregroundStyle(.white.opacity(0.85))
+        }
+    }
+
+    private var offlineReason: String {
+        if case .offline(let reason) = agent.connection { return reason }
+        return ""
+    }
+
+    private var opencodeOfflineCard: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text("The background agent isn’t running. Restart it with:")
                 .font(.system(size: 10.5))

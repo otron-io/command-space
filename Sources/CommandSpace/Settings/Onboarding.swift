@@ -116,7 +116,7 @@ struct Onboarding: View {
 
     private var agent: some View {
         stepLayout(title: "System Two: the agent",
-                   subtitle: "Questions and tasks go to Space, an AI agent (opencode) running in the background, using ChatGPT, an API key, or a local model.",
+                   subtitle: "Questions and tasks go to Space, an AI agent running on opencode, or on your own Codex or Claude Code with your ChatGPT or Claude subscription.",
                    primary: ("Continue", { go(.jev) })) {
             SetupChecklist(groups: [.agent])
             Text("Run the setup command in Terminal once, then choose a model. Every command Space wants to run asks for your approval first.")

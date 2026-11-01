@@ -23,6 +23,11 @@ struct CommandSpaceMain {
             let ok = MainActor.assumeIsolated { MoodSheet.render(to: URL(fileURLWithPath: args[flag + 1])) }
             exit(ok ? 0 : 1)
         }
+        if let flag = args.firstIndex(of: "--harness-check"), args.count > flag + 1 {
+            MainActor.assumeIsolated { HarnessCheck.run(args[flag + 1]) }
+            NSApplication.shared.setActivationPolicy(.prohibited)
+            NSApplication.shared.run()
+        }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -76,7 +81,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             CommandPanelController.shared.model.query = args[flag + 1]
         } else if args.contains("--conversations") {
             ThreadWindowController.shared.show(nil)
-            if let flag = args.firstIndex(of: "--conversations"), args.count > flag + 1, args[flag + 1].hasPrefix("ses_") {
+            if let flag = args.firstIndex(of: "--conversations"), args.count > flag + 1, !args[flag + 1].hasPrefix("-") {
                 ThreadWindowController.shared.show(AgentManager.shared.thread(forSession: args[flag + 1]))
             }
         } else if args.contains("--settings") {

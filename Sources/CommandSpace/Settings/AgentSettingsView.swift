@@ -4,7 +4,8 @@
 //
 //  Settings for Space, the agent, split the way it works:
 //  System One answers instant decisions (Snap 1 on this Mac, or TypeSafe's Jev);
-//  System Two is the agent itself (`opencode serve`: models, providers, credentials).
+//  System Two is the agent itself, on a harness of your choice: opencode (models, providers,
+//  credentials managed here), or your own Codex / Claude Code CLI on your subscription.
 //
 
 import AppKit
@@ -35,6 +36,7 @@ struct AgentSettings: View {
     var page: AgentSettingsPage = .agent
     @ObservedObject private var client = OpencodeConfigClient.shared
     @Default(.agentServerURL) private var serverURL
+    @Default(.systemTwoHarness) private var harness
     @State private var connectProviderID = ""
 
     var body: some View {
@@ -55,26 +57,19 @@ struct AgentSettings: View {
                 SystemOneUsesSection()
                 LearnedActionsSection()
             case .systemTwo:
-                connectionSection
-                modelSection
-                Section {
-                    ProviderAuthForm(providerID: "openai", preferOAuth: true)
-                } header: {
-                    Text("ChatGPT / Codex")
-                } footer: {
-                    Text("Log in with a ChatGPT Plus/Pro subscription to use OpenAI models without an API key. This replaces any OpenAI API key stored in opencode.")
-                        .foregroundStyle(.secondary)
-                        .font(.caption)
+                HarnessPickerSection()
+                if harness == .opencode {
+                    opencodeSections
+                } else {
+                    HarnessModelSection(harness: harness)
                 }
-                providersSection
-                connectSection
             case .voice:
                 VoiceSettingsSection()
                 WhistleSettingsSection()
             case .spotify:
                 SpotifySettingsSection()
             }
-            if page == .agent || page == .systemTwo, let error = client.lastError {
+            if page == .agent || (page == .systemTwo && harness == .opencode), let error = client.lastError {
                 Section {
                     Label(error, systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
@@ -90,6 +85,23 @@ struct AgentSettings: View {
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
             }
         }
+    }
+
+    @ViewBuilder
+    private var opencodeSections: some View {
+                connectionSection
+                modelSection
+                Section {
+                    ProviderAuthForm(providerID: "openai", preferOAuth: true)
+                } header: {
+                    Text("ChatGPT / Codex")
+                } footer: {
+                    Text("Log in with a ChatGPT Plus/Pro subscription to use OpenAI models without an API key. This replaces any OpenAI API key stored in opencode.")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                }
+                providersSection
+                connectSection
     }
 
     // MARK: Connection

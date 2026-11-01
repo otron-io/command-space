@@ -225,9 +225,15 @@ private struct SessionRow: View {
                         .font(.system(size: 13, weight: selected ? .semibold : .regular))
                         .foregroundStyle(.white.opacity(selected ? 1 : 0.85))
                         .lineLimit(1)
-                    Text(session.updated.formatted(.relative(presentation: .named)))
-                        .font(.system(size: 11))
-                        .foregroundStyle(.gray)
+                    HStack(spacing: 4) {
+                        Text(session.updated.formatted(.relative(presentation: .named)))
+                        Text("·")
+                        Image(systemName: session.harness.icon).font(.system(size: 8.5))
+                        Text(session.harness.name)
+                    }
+                    .font(.system(size: 11))
+                    .foregroundStyle(.gray)
+                    .lineLimit(1)
                 }
                 Spacer(minLength: 4)
                 if let live, !live.permissions.isEmpty {
@@ -361,15 +367,20 @@ private struct ThreadTranscript: View {
     private var mood: SpaceMood {
         if !thread.permissions.isEmpty { return .attention }
         if thread.isBusy { return .working }
-        if case .offline = manager.connection { return .offline }
+        if case .offline = harnessConnection { return .offline }
         return .idle
     }
 
     private var status: String {
         if !thread.permissions.isEmpty { return "Waiting for your approval" }
         if thread.isBusy { return "Working…" }
-        if case .offline = manager.connection { return "System Two is offline" }
-        return thread.ownedBySystemTwo ? "System Two · everything here goes to the agent" : "New conversation"
+        if case .offline(let reason) = harnessConnection { return reason }
+        return thread.ownedBySystemTwo ? "\(thread.harness.name) · everything here goes to the agent" : "New conversation"
+    }
+
+    /// The conversation's own harness, which may not be the one selected for new conversations.
+    private var harnessConnection: AgentConnection {
+        thread.ownedBySystemTwo ? manager.backend(thread.harness).connection : manager.connection
     }
 
     private func scrollToEnd(_ proxy: ScrollViewProxy) {

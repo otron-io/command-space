@@ -272,9 +272,9 @@ struct CommandSpaceView: View {
 
     private var statusText: String {
         switch agent.connection {
-        case .connected: return agent.isBusy ? "Space is working" : "System Two ready"
-        case .connecting: return "Connecting to System Two…"
-        case .offline: return "System Two offline · search and System One still work"
+        case .connected: return agent.isBusy ? "Space is working" : "System Two ready · \(agent.activeHarness.name)"
+        case .connecting: return "Connecting to \(agent.activeHarness.name)…"
+        case .offline: return "\(agent.activeHarness.name) offline · search and System One still work"
         }
     }
 
