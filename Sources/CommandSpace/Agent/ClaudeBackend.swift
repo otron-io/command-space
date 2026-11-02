@@ -111,13 +111,12 @@ final class ClaudeBackend: AgentBackend {
         live[session]?.setMode(mode)
     }
 
-    func send(_ text: String, context: String?, mode: AgentMode, to session: String) async throws {
+    func send(_ text: String, context: AgentRequestContext?, mode: AgentMode, to session: String) async throws {
         try await ready()
         let conversation = try process(for: session, mode: mode)
         if conversation.mode != mode { conversation.setMode(mode) }
-        let message = context.map { SpaceWorkspace.wrap(context: $0, around: text) } ?? text
         AgentBackendSink.event(harness, session, .busy(true))
-        conversation.send(message)
+        conversation.send(AgentInput.claude(text, context: context))
     }
 
     func abort(_ session: String) {
@@ -369,10 +368,10 @@ final class ClaudeSession {
         control(["subtype": "initialize"])
     }
 
-    func send(_ text: String) {
+    func send(_ content: [[String: Any]]) {
         idleTask?.cancel()
         isBusy = true
-        process.send(["type": "user", "message": ["role": "user", "content": text]])
+        process.send(["type": "user", "message": ["role": "user", "content": content]])
     }
 
     func interrupt() { control(["subtype": "interrupt"]) }

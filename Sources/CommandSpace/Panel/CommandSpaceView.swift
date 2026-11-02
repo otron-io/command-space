@@ -75,6 +75,8 @@ struct CommandSpaceView: View {
             if expanded {
                 field
                     .transition(.opacity.combined(with: .move(edge: .leading)))
+                ScreenContextControl()
+                    .transition(.opacity)
                 trailing
                     .transition(.opacity)
             }
@@ -161,7 +163,7 @@ struct CommandSpaceView: View {
         if !agent.permissions.isEmpty { return .attention }
         if agent.isBusy { return .working }
         if case .offline = agent.connection, model.mode == .agent { return .offline }
-        if model.mode == .search && !model.query.isEmpty && search.intent == nil && DecisionEngine.shared.onDeviceAvailable {
+        if model.mode == .search && !model.query.isEmpty && !SearchEngine.hasLocalAnswer(model.query) && !search.asksAboutScreen && search.intent == nil && DecisionEngine.shared.onDeviceAvailable {
             return .thinking
         }
         return .idle
@@ -171,6 +173,7 @@ struct CommandSpaceView: View {
 
     private var card: some View {
         VStack(spacing: 0) {
+            ScreenContextStrip(query: model.query)
             Group {
                 switch model.mode {
                 case .agent:
@@ -247,7 +250,10 @@ struct CommandSpaceView: View {
 
     @ViewBuilder
     private var footerStatus: some View {
-        if model.mode == .search, let intent = search.intent {
+        if model.mode == .search, let selected = model.selectedResult, selected.kind == .conversion || selected.kind == .calculation {
+            Label(selected.kind == .conversion ? "Converter · on this Mac" : "Calculator · on this Mac", systemImage: "bolt.fill")
+                .font(.system(size: 10.5, weight: .medium)).foregroundStyle(.cyan)
+        } else if model.mode == .search, let intent = search.intent {
             HStack(spacing: 5) {
                 Image(systemName: "sparkles").foregroundStyle(snapGradient)
                 Text("Snap 1 · \(Self.intentLabel(intent))" + (search.snapLatency.map { " · \(Int($0 * 1000)) ms" } ?? ""))
@@ -305,7 +311,7 @@ struct CommandSpaceView: View {
         case .command, .system, .shortcut:
             if case .resolved(.spotify) = result.action { return "Play" }
             return "Run"
-        case .calculation: return "Copy"
+        case .calculation, .conversion: return "Copy"
         case .ask: return "Ask"
         case .conversation: return "Continue"
         }

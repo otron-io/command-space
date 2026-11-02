@@ -251,7 +251,7 @@ final class AgentThread: ObservableObject, Identifiable {
 
     /// - Parameter showResult: show Command Space with the outcome when done (for requests
     ///   made without it open, like push-to-talk).
-    func send(_ text: String, showResult: Bool = false) {
+    func send(_ text: String, showResult: Bool = false, useCapturedContext: Bool = true) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
         SpaceMarkEvents.fire(.send)
@@ -259,14 +259,20 @@ final class AgentThread: ObservableObject, Identifiable {
         Task {
             followUp = nil
             learnOffer = nil
-            // Typed requests: capture the app behind Command Space (no ⌘C fallback, the panel has
-            // keyboard focus). Push-to-talk already captured when the key went down.
-            if !showResult { ContextCapture.shared.begin(allowCopyFallback: false) }
-            // System One handles simple requests instantly, but only until System Two has the
-            // conversation: after that, "the Command Space app" is an answer, not a command.
-            if !ownedBySystemTwo {
+            // The panel and push-to-talk captured the source at invocation. Never recapture here:
+            // the selected text may be gone and the source may now be Command Space itself.
+            let capture = ContextCapture.shared
+            let choice: ContextCapture.Choice = useCapturedContext ? capture.choice : .automatic
+            let screen = useCapturedContext ? await capture.context(maxWait: 2.5) : nil
+            if choice == .include { capture.choice = .automatic }
+            let screenQuestion = choice != .exclude && screen?.needsSystemTwo(for: trimmed) == true
+            // Comprehension questions go straight to System Two, not a coincidentally matching
+            // instant action. Ordinary "copy this link" and menu commands can still be instant.
+            var refers: String?
+            if !ownedBySystemTwo && choice != .include && !screenQuestion {
                 if showResult { manager.setRoutingVoice(true) }
-                let quick = await QuickActions.shared.tryHandle(trimmed)
+                let quick = await QuickActions.shared.tryHandle(trimmed, useCapturedContext: useCapturedContext && choice != .exclude)
+                refers = QuickActions.shared.lastThisRefers
                 manager.setRoutingVoice(false)
                 if let quick {
                     items.append(AgentItem(id: UUID().uuidString, kind: .user, text: trimmed))
@@ -289,11 +295,17 @@ final class AgentThread: ObservableObject, Identifiable {
                 isBusy = true
                 // "Summarize this", "move these": give the agent what the user is looking at,
                 // sent so the chat shows only what was said.
-                var context: String?
-                let refers = QuickActions.shared.lastThisRefers
-                if let screen = await ContextCapture.shared.context(maxWait: 0.3), screen.hasReferent,
-                   (refers != nil && refers != "none") || (refers == nil && RequestParsing.mentionsOnScreen(trimmed)) {
-                    context = screen.promptBlock(focus: refers)
+                var context: AgentRequestContext?
+                // Only a routing decision made for THIS turn is meaningful (never reuse a hint
+                // left behind by System One on an earlier conversation).
+                if Defaults[.screenIntelligence], capture.choice != .exclude, let screen, choice != .exclude,
+                   choice == .include || screen.shouldAttach(to: trimmed) {
+                    var source = screen.focused(for: trimmed, includeWholeWindow: choice == .include)
+                    if !Defaults[.screenImages] { source.image = nil }
+                    var textOnly = source
+                    textOnly.image = nil
+                    let fallback = source.selectedText != nil || source.visibleText != nil ? textOnly.promptBlock(focus: refers) : nil
+                    context = AgentRequestContext(source.promptBlock(focus: refers), image: source.image, textOnlyFallback: fallback)
                 }
                 planReadyItemID = nil
                 try await backend.send(trimmed, context: context, mode: mode, to: sessionID)
@@ -738,7 +750,7 @@ final class AgentManager: ObservableObject {
     /// window if it's in front, or the panel's open conversation); otherwise start a new thread.
     func sendFromVoice(_ text: String) {
         if ThreadWindowController.shared.isKey, let thread = ThreadWindowController.shared.thread {
-            thread.send(text, showResult: false)
+            thread.send(text, showResult: false, useCapturedContext: false)
             return
         }
         let panel = CommandPanelController.shared
@@ -753,7 +765,7 @@ final class AgentManager: ObservableObject {
     /// Ambient nudges start their own thread.
     func startThread(with text: String) {
         current = AgentThread()
-        current.send(text)
+        current.send(text, useCapturedContext: false)
     }
 
     func setRoutingVoice(_ on: Bool) { isRoutingVoice = on }

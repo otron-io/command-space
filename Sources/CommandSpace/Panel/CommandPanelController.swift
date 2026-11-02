@@ -152,6 +152,18 @@ final class CommandPanelController: NSObject, NSWindowDelegate {
                        display: false)
     }
 
+    #if DEBUG
+    /// App-owned view capture for UI smoke tests; never screenshots the user's desktop.
+    func saveSnapshot(to url: URL) -> Bool {
+        guard let view = panel.contentView else { return false }
+        view.layoutSubtreeIfNeeded()
+        guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
+        view.cacheDisplay(in: view.bounds, to: bitmap)
+        guard let data = bitmap.representation(using: .png, properties: [:]) else { return false }
+        do { try data.write(to: url); return true } catch { return false }
+    }
+    #endif
+
     // MARK: NSWindowDelegate
 
     func windowDidResignKey(_ notification: Notification) {

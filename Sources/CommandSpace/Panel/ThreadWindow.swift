@@ -60,7 +60,7 @@ final class ThreadWindowController: NSObject, ObservableObject, NSWindowDelegate
         draft = ""
         let target = thread ?? AgentThread()
         if thread == nil { select(target) }
-        target.send(text)
+        target.send(text, useCapturedContext: false)
     }
 
     private func makeWindow() -> NSWindow {

@@ -170,7 +170,7 @@ final class CodexBackend: AgentBackend {
 
     func setMode(_ mode: AgentMode, for session: String) {}
 
-    func send(_ text: String, context: String?, mode: AgentMode, to session: String) async throws {
+    func send(_ text: String, context: AgentRequestContext?, mode: AgentMode, to session: String) async throws {
         try await ready()
         if !loaded.contains(session) {
             var params = threadSettings
@@ -179,10 +179,8 @@ final class CodexBackend: AgentBackend {
             _ = try await call("thread/resume", params)
             loaded.insert(session)
         }
-        let hidden = [mode == .plan ? SpaceWorkspace.planInstruction : nil, context].compactMap { $0 }
-        let message = hidden.isEmpty ? text : SpaceWorkspace.wrap(context: hidden.joined(separator: "\n\n"), around: text)
         let policy = Self.policy(for: mode)
-        var params: [String: Any] = ["threadId": session, "input": [["type": "text", "text": message]],
+        var params: [String: Any] = ["threadId": session, "input": AgentInput.codex(text, context: context, planning: mode == .plan),
                                      "approvalPolicy": policy.approval, "sandboxPolicy": policy.sandbox]
         let model = Defaults[.codexModel]
         if !model.isEmpty { params["model"] = model }

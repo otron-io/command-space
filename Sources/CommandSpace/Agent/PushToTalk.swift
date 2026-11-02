@@ -147,7 +147,9 @@ final class PushToTalk {
             guard let self, !Task.isCancelled, self.pressedAt != nil else { return }
             self.confirmed = true
             // Grab "this" (selection, window, page) and the app's menus before anything changes focus.
-            ContextCapture.shared.begin(allowCopyFallback: true)
+            if !CommandPanelController.shared.isVisible {
+                ContextCapture.shared.begin(allowCopyFallback: true)
+            }
             self.duck()
             NotificationCenter.default.post(name: .agentVoiceStarted, object: nil)
         }
@@ -178,7 +180,9 @@ final class PushToTalk {
         VoiceInput.shared.begin()
         guard VoiceInput.shared.state == .listening else { return }
         // No ⌘C fallback: the user may be across the room, so don't type into the front app.
-        ContextCapture.shared.begin(allowCopyFallback: false)
+        if !CommandPanelController.shared.isVisible {
+            ContextCapture.shared.begin(allowCopyFallback: false)
+        }
         duck()
         NotificationCenter.default.post(name: .agentVoiceStarted, object: nil)
         handsFreeTask = Task { [weak self] in

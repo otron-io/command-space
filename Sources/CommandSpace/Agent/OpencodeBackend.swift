@@ -42,11 +42,27 @@ final class OpencodeBackend: AgentBackend {
         return id
     }
 
-    func send(_ text: String, context: String?, mode: AgentMode, to session: String) async throws {
-        var parts: [[String: Any]] = [["type": "text", "text": text]]
-        // Sent as a hidden (synthetic) part so the chat shows only what was said.
-        if let context { parts.insert(["type": "text", "text": context, "synthetic": true], at: 0) }
-        var body: [String: Any] = ["parts": parts]
+    func send(_ text: String, context: AgentRequestContext?, mode: AgentMode, to session: String) async throws {
+        var context = context
+        if context?.image != nil {
+            var model = Defaults[.agentModelOverride]
+            if model.isEmpty, let data = try? await request("GET", "/config"),
+               let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+                model = config["model"] as? String ?? ""
+            }
+            if let data = try? await request("GET", "/provider"),
+               let providers = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               AgentInput.opencodeSupportsImages(providers, model: model) == false {
+                guard let fallback = context?.textOnlyFallback else {
+                    throw NSError(domain: "CommandSpace.ScreenContext", code: 1, userInfo: [NSLocalizedDescriptionKey:
+                        "\(model) is text-only. Choose a vision-capable model under Settings → System Two, or use Codex or Claude Code to ask about images."])
+                }
+                context = AgentRequestContext(fallback)
+                AgentBackendSink.event(harness, session, .item(AgentItem(id: UUID().uuidString,
+                    kind: .quick(icon: "text.viewfinder"), text: "Using page/selection text — this model doesn’t support images")))
+            }
+        }
+        var body: [String: Any] = ["parts": AgentInput.opencode(text, context: context)]
         // Plan mode is opencode's built-in plan agent. Other modes use the workspace's own agent;
         // Command Space answers the approvals those modes skip.
         if mode == .plan { body["agent"] = "plan" }

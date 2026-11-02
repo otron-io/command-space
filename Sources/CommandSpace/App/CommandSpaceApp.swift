@@ -23,6 +23,11 @@ struct CommandSpaceMain {
             let ok = MainActor.assumeIsolated { MoodSheet.render(to: URL(fileURLWithPath: args[flag + 1])) }
             exit(ok ? 0 : 1)
         }
+        if let flag = args.firstIndex(of: "--harness-image-check"), args.count > flag + 1 {
+            NSApplication.shared.setActivationPolicy(.prohibited)
+            MainActor.assumeIsolated { HarnessCheck.runImage(args[flag + 1]) }
+            NSApplication.shared.run()
+        }
         if let flag = args.firstIndex(of: "--harness-check"), args.count > flag + 1 {
             let mode = args.count > flag + 2 ? AgentMode(rawValue: args[flag + 2]) ?? .ask : .ask
             MainActor.assumeIsolated { HarnessCheck.run(args[flag + 1], mode: mode) }
@@ -79,7 +84,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let args = CommandLine.arguments
         if let flag = args.firstIndex(of: "--query"), args.count > flag + 1 {
             CommandPanelController.shared.show(mode: .search)
+            #if DEBUG
+            if args.contains("--screen-context-demo") {
+                var source = ScreenContext(app: "Screen intelligence demo", bundleID: nil)
+                source.windowTitle = "Example article"
+                source.selectedText = "Photovoltaic cells convert light into electricity using semiconductor materials."
+                ContextCapture.shared.setPreview(source)
+            }
+            #endif
             CommandPanelController.shared.model.query = args[flag + 1]
+            #if DEBUG
+            if let snapshot = args.firstIndex(of: "--snapshot"), args.count > snapshot + 1 {
+                Task {
+                    try? await Task.sleep(for: .seconds(1))
+                    let panel = CommandPanelController.shared
+                    let ok = panel.saveSnapshot(to: URL(fileURLWithPath: args[snapshot + 1]))
+                    print("panel snapshot: \(ok); selected: \(panel.model.selectedResult?.title ?? "none")")
+                    exit(ok ? 0 : 1)
+                }
+            }
+            #endif
         } else if args.contains("--conversations") {
             ThreadWindowController.shared.show(nil)
             if let flag = args.firstIndex(of: "--conversations"), args.count > flag + 1, !args[flag + 1].hasPrefix("-") {

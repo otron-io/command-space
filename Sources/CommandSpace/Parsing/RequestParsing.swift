@@ -88,7 +88,7 @@ enum RequestParsing {
 
     /// Whether a request points at something on screen ("summarize this", "these files").
     static func mentionsOnScreen(_ text: String) -> Bool {
-        text.range(of: #"\b(this|these|that|those|it|here|selected|selection|highlighted|page|tab|site|article|website|email|file|files|window|screen)\b"#,
+        text.range(of: #"\b(this|these|that|those|here|selected|selection|highlighted|window|screen|looking at|(?:the|current|active) (?:page|tab|site|article|website|email|file|files|image|photo|document))\b"#,
                    options: [.regularExpression, .caseInsensitive]) != nil
     }
 

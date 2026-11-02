@@ -16,6 +16,8 @@ Command Space grew out of [Notch Agent](https://github.com/MoMia7/boring.notch).
 | `github.com`, `localhost:3000` | Opens in your default browser |
 | anything, then **⌥⏎** | Google search in your default browser |
 | `12*(3+4)`, `15% of 80` | The answer. ⏎ copies it. |
+| `10 km to miles`, `70 kg in lbs`, `32 F to C` | Instant unit conversions, entirely local. ⏎ copies the result. |
+| `1 GiB to MB`, `60 mph to km/h`, `255 to hex` | Data sizes, speed, and integer number bases, too |
 | `wifi`, `displays` | System Settings panes |
 | `lock`, `sleep`, `restart` | System commands. Restart, shut down and log out ask first. |
 | `vol`, `next`, `dark` | **System One commands**: instant actions, plus everything Space has learned |
@@ -60,7 +62,18 @@ Command Space finds the Codex and Claude Code CLIs on its own and shows whether 
 
 In Ask first, every shell command or file edit with side effects asks for your approval first. When a task finishes using simple commands, Command Space offers **Make this instant**. After that, System One replays it directly, and it appears in search as a learned command.
 
-**It knows what "this" is.** Command Space never takes focus from your app, so when you ask about "this", it reads your selection, the selected Finder files, the browser page and the window you were in.
+## Instant conversions
+
+Conversions work without System One, System Two, or the internet, and skip model ranking. Supported: length, mass, temperature, volume, duration, speed, area, energy, pressure, angles, data sizes, and decimal/hex/binary/octal integers. Use `to`, `in`, `into`, `as`, `=`, or `→` between units. Decimal input follows your locale. Data symbols distinguish bits and bytes (`Mb` versus `MB`); `MiB`/`GiB` use binary multiples. Cooking volumes are explicitly labelled **US**, unless you ask for imperial gallons. Currency rates and weight-to-volume conversions aren't guessed.
+
+## Screen intelligence
+
+Open **⌘Space** over the page or app you want to ask about, then type **“summarize this page”**, **“explain the highlighted text”**, or **“what's in this image?”**. The source is captured when you open the launcher, not after you start typing. Push-to-talk captures it when listening starts; speaking with the panel open keeps that panel's source.
+
+- **Text:** selected text, available accessibility page/window text, browser URL/title, and selected Finder files. Text capture needs Accessibility permission; browser links and Finder selections also use Automation if already authorized. Opening the launcher never requests Automation permission.
+- **Images:** a picture of the original source window, excluding the launcher, sent as a real image attachment to Codex, Claude Code, or a vision-capable opencode model. Enable **Settings → General → Screen intelligence → Enable window images…**, grant Screen Recording, then reopen ⌘Space. A text-only opencode model uses readable text instead and says so; if only an image is available, the app asks you to choose a vision-capable model.
+- **Control:** the viewfinder in the bar offers automatic context, explicit attachment, or exclusion. A preview strip shows what will be shared. A question about highlighted text sends just the passage, not the rest of the page/image, unless you ask about the whole window or explicitly attach it.
+- **Privacy:** context stays local until you send a relevant question or explicitly attach it, then goes to your chosen System Two harness and may be retained in its history. Images are not saved as screenshot files by Command Space. System One only gets metadata, never the selection, page text, or image. Turn text context or images off separately in General settings. Unrelated questions don't attach the screen. Continuing an old thread in the permanent window does not reuse an unrelated launcher capture.
 
 ## Without opening it
 
@@ -97,8 +110,10 @@ Requires macOS 14+. Voice input needs macOS 26+.
 ## Development
 
 ```sh
-swift build && swift test                 # 39 tests: parsing, whistle matching, fuzzy match, calculator, URLs
+swift build && swift test                 # parsing, conversions, screen payloads, harnesses, search, whistles
 .build/debug/CommandSpace --query "saf"   # open the panel pre-filled (also --agent)
+.build/debug/CommandSpace --harness-image-check codex  # synthetic image test, no screen upload
+# Debug builds: add --snapshot /absolute/path/panel.png to --query to capture the app's own view and exit.
 scripts/build-app.sh                      # → build/Command Space.app (signed, universal)
 scripts/build-app.sh --install            # … and copy to /Applications
 scripts/build-app.sh --dmg                # … and Command-Space.dmg + signed appcast.xml entry

@@ -122,6 +122,8 @@ struct GeneralSettingsSections: View {
                 .font(.caption).foregroundStyle(.secondary)
         }
 
+        ScreenIntelligenceSettings()
+
         Section {
             LaunchAtLogin.Toggle("Open at login")
             if NotchAgentImport.isInstalled {

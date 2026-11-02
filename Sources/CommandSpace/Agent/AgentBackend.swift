@@ -58,7 +58,7 @@ protocol AgentBackend: AnyObject {
 
     func createSession() async throws -> String
     /// `context` is what the user was looking at; harnesses send it without showing it.
-    func send(_ text: String, context: String?, mode: AgentMode, to session: String) async throws
+    func send(_ text: String, context: AgentRequestContext?, mode: AgentMode, to session: String) async throws
     /// Switch a conversation's mode now (harnesses that apply modes per request can ignore it).
     func setMode(_ mode: AgentMode, for session: String)
     func abort(_ session: String)

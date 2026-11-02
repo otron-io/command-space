@@ -27,7 +27,7 @@ extension Defaults.Keys {
 
 struct SearchResult: Identifiable, Equatable {
     enum Kind: String {
-        case app, document, folder, place, setting, command, system, web, address, calculation, ask, shortcut, conversation
+        case app, document, folder, place, setting, command, system, web, address, calculation, conversion, ask, shortcut, conversation
 
         var label: String {
             switch self {
@@ -40,6 +40,7 @@ struct SearchResult: Identifiable, Equatable {
             case .web: "Web"
             case .address: "Open"
             case .calculation: "Calculator"
+            case .conversion: "Converter"
             case .ask: "Ask Space"
             case .shortcut: "Shortcut"
             case .conversation: "Conversation"
@@ -101,9 +102,16 @@ final class SearchEngine: ObservableObject {
     private var music: (query: String, rows: [SearchResult])?
 
     private var appsObserver: AnyCancellable?
+    private var contextObserver: AnyCancellable?
 
     init() {
         Task { shortcuts = await SystemBridge.shared.listShortcuts() }
+        contextObserver = ContextCapture.shared.$captured.combineLatest(ContextCapture.shared.$choice)
+            .dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in
+                guard let self, !self.currentQuery.isEmpty else { return }
+                self.rebuild()
+                self.scheduleSnap(for: self.currentQuery)
+            }
         // The app index fills in the background; refresh results when it lands.
         appsObserver = AppIndex.shared.$apps.dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in
             guard let self, !self.currentQuery.isEmpty else { return }
@@ -124,10 +132,12 @@ final class SearchEngine: ObservableObject {
             results = []
             return
         }
+        let localAnswer = Self.hasLocalAnswer(query)
+        if localAnswer { files.cancel(); fileHits = [] }
         fileHits = fileHits.filter { $0.name.lowercased().contains(query.lowercased().split(separator: " ").first.map(String.init) ?? "") }
         rebuild()
         if CommandPreview.detect(query).contains("play_music") { scheduleMusic(for: query) } else { musicTask?.cancel() }
-        if Defaults[.searchFiles], query.count >= 2, QuickOpen.webURL(from: query) == nil, Calculator.evaluate(query) == nil {
+        if Defaults[.searchFiles], query.count >= 2, QuickOpen.webURL(from: query) == nil, !localAnswer {
             files.search(query) { [weak self] hits in
                 guard let self, self.currentQuery == query else { return }
                 self.fileHits = hits
@@ -145,6 +155,16 @@ final class SearchEngine: ObservableObject {
         let q = query.lowercased()
         var list: [SearchResult] = []
 
+        if let conversion = UnitConverter.evaluate(query) {
+            list.append(.init(id: "convert", kind: .conversion, title: "= \(conversion.answer)",
+                              subtitle: "\(conversion.source) · Converted on this Mac · ⏎ to copy",
+                              icon: .symbol("arrow.left.arrow.right.square.fill", .cyan),
+                              action: .copy(conversion.answer), score: 2))
+        } else if let answer = UnitConverter.numberBase(query) {
+            list.append(.init(id: "convert", kind: .conversion, title: "= \(answer)",
+                              subtitle: "Number base · Converted on this Mac · ⏎ to copy",
+                              icon: .symbol("number.square.fill", .cyan), action: .copy(answer), score: 2))
+        }
         // Arithmetic first: if it parses, that's what was meant.
         if let value = Calculator.evaluate(query) {
             let text = Calculator.format(value)
@@ -235,8 +255,9 @@ final class SearchEngine: ObservableObject {
         list.removeAll { $0.id.hasPrefix("cmd:") && resolvedIDs.contains(String($0.id.dropFirst(4))) }
 
         // The agent is always one keystroke away (⇥). Sentences and questions put it on top.
-        list.append(.init(id: "ask", kind: .ask, title: query, subtitle: "Ask Space",
-                          icon: .mark, action: .ask(query), score: askScore(query)))
+        list.append(.init(id: "ask", kind: .ask, title: query,
+                          subtitle: asksAboutScreen ? "Ask Space · screen intelligence" : "Ask Space",
+                          icon: .mark, action: .ask(query), score: asksAboutScreen ? 1.5 : askScore(query)))
         if Defaults[.searchWebFallback] || answerIntent == "web_search" {
             if let url = QuickOpen.webSearchURL(query) {
                 list.append(.init(id: "web", kind: .web, title: "Search the web for “\(query)”", subtitle: "Google · ⌥⏎ from anywhere in the list",
@@ -250,6 +271,11 @@ final class SearchEngine: ObservableObject {
     }
 
     private var answerIntent: String? { snapAnswer?.query == currentQuery ? snapAnswer?.intent : nil }
+
+    var asksAboutScreen: Bool {
+        Defaults[.screenIntelligence] && ContextCapture.shared.choice != .exclude &&
+            (ContextCapture.shared.choice == .include || ContextCapture.shared.captured?.needsSystemTwo(for: currentQuery) == true)
+    }
 
     private func commandResult(_ command: QuickActions.Command, score: Double) -> SearchResult {
         .init(id: "cmd:" + command.id, kind: .command, title: command.title,
@@ -304,9 +330,13 @@ final class SearchEngine: ObservableObject {
 
     // MARK: Snap 1
 
+    static func hasLocalAnswer(_ query: String) -> Bool {
+        UnitConverter.evaluate(query) != nil || UnitConverter.numberBase(query) != nil || Calculator.evaluate(query) != nil
+    }
+
     private func scheduleSnap(for query: String) {
         snapTask?.cancel()
-        guard Defaults[.searchSnapRanking], DecisionEngine.shared.onDeviceAvailable, query.count >= 2 else { return }
+        guard !Self.hasLocalAnswer(query), !asksAboutScreen, Defaults[.searchSnapRanking], DecisionEngine.shared.onDeviceAvailable, query.count >= 2 else { return }
         snapTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(90))
             guard !Task.isCancelled, let self else { return }

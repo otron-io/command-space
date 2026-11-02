@@ -144,8 +144,12 @@ final class BareHourTests: XCTestCase {
     }
 
     func testTomorrowAtSix() {
-        let r = RequestParsing.datedText("remind me to call mom tomorrow at 6", commandPatterns: RequestParsing.reminderCommands, now: date(1, 13))
-        XCTAssertEqual(r.date, date(2, 18))
+        // NSDataDetector resolves relative words against the system clock, not a fixed fixture date.
+        let today = Calendar.current.startOfDay(for: Date())
+        let tomorrow = Calendar.current.date(byAdding: .day, value: 1, to: today)!
+        let expected = Calendar.current.date(bySettingHour: 18, minute: 0, second: 0, of: tomorrow)!
+        let r = RequestParsing.datedText("remind me to call mom tomorrow at 6", commandPatterns: RequestParsing.reminderCommands)
+        XCTAssertEqual(r.date, expected)
         XCTAssertEqual(r.title, "Call mom")
     }
 }

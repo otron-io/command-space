@@ -12,6 +12,68 @@ import Foundation
 
 @MainActor
 enum HarnessCheck {
+    /// A synthetic image proves multimodal delivery without capturing or uploading the user's screen.
+    static func runImage(_ name: String) {
+        guard let harness = SystemTwoHarness(rawValue: name) else { print("unknown harness \(name)"); exit(2) }
+        let backend: AgentBackend
+        switch harness {
+        case .opencode: backend = OpencodeBackend()
+        case .codex: backend = CodexBackend()
+        case .claudeCode: backend = ClaudeBackend()
+        }
+        setvbuf(stdout, nil, _IOLBF, 0)
+        let code = "COMET-\(Int.random(in: 10...99))"
+        let image = NSImage(size: NSSize(width: 640, height: 200))
+        image.lockFocus()
+        NSColor.white.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: 640, height: 200)).fill()
+        (code as NSString).draw(at: NSPoint(x: 50, y: 70), withAttributes: [
+            .font: NSFont.monospacedSystemFont(ofSize: 64, weight: .bold), .foregroundColor: NSColor.black])
+        image.unlockFocus()
+        guard let tiff = image.tiffRepresentation, let bitmap = NSBitmapImageRep(data: tiff),
+              let bytes = bitmap.representation(using: .png, properties: [:]) else { print("could not generate image"); exit(1) }
+        let context = AgentRequestContext("A synthetic test image is attached.", image: ScreenImage(data: bytes, mimeType: "image/png"))
+        var completed = false
+        var sawBusy = false
+        var failure: String?
+        AgentBackendSink.changed = { _ in }
+        AgentBackendSink.event = { _, _, event in
+            switch event {
+            case .busy(let busy):
+                if busy { sawBusy = true } else if sawBusy { completed = true }
+            case .error(let text): failure = text; completed = true
+            case .permission(let permission): backend.reply(to: permission, with: .reject)
+            default: break
+            }
+        }
+        backend.start()
+        Task {
+            var session: String?
+            do {
+                let id = try await backend.createSession()
+                session = id
+                print("image check · \(harness.name) · session \(id)")
+                try await backend.send("Read the code printed in the attached image. Reply with just that code. Do not use tools.",
+                                       context: context, mode: .ask, to: id)
+                let deadline = Date().addingTimeInterval(120)
+                while !completed && Date() < deadline { try await Task.sleep(for: .milliseconds(100)) }
+                let snapshot = await backend.snapshot(of: id)
+                let answer = snapshot?.items.filter { $0.kind == .assistant }.map(\.text).joined(separator: "\n") ?? ""
+                let matched = completed && failure == nil && answer.contains(code)
+                print("expected: \(code); answer: \(answer.prefix(200)); matched: \(matched)")
+                if let failure { print("error: \(failure)") }
+                await backend.delete(id)
+                backend.stop()
+                exit(matched ? 0 : 1)
+            } catch {
+                if let session { await backend.delete(session) }
+                backend.stop()
+                print("image check failed: \(error.localizedDescription)")
+                exit(1)
+            }
+        }
+    }
+
     static func run(_ name: String, mode: AgentMode = .ask) {
         guard let harness = SystemTwoHarness(rawValue: name) else {
             print("unknown harness \(name)"); exit(2)
@@ -55,7 +117,7 @@ enum HarnessCheck {
                 ]
                 for (n, text) in turns.enumerated() {
                     print("== turn \(n + 1)")
-                    try await backend.send(text, context: n == 0 ? "App: Finder" : nil, mode: current, to: session)
+                    try await backend.send(text, context: n == 0 ? AgentRequestContext("App: Finder") : nil, mode: current, to: session)
                     await withCheckedContinuation { idle = $0 }
                 }
                 let snapshot = await backend.snapshot(of: session)

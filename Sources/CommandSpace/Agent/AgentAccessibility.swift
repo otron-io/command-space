@@ -106,18 +106,20 @@ extension SystemHelper {
                 context["windowTitle"] = title
             }
             var selected: String?
-            if let focused: AXUIElement = Self.attribute(app, kAXFocusedUIElementAttribute),
+            let focused: AXUIElement? = Self.attribute(app, kAXFocusedUIElementAttribute)
+            let secure = focused.map { (Self.attribute($0, kAXSubroleAttribute) as String?) == "AXSecureTextField" } ?? false
+            if let focused, !secure,
                let text: String = Self.attribute(focused, kAXSelectedTextAttribute),
                !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 selected = text
             }
             let isFinder = bundleID == "com.apple.finder"
-            if selected == nil, allowCopyFallback, !isFinder {
+            if selected == nil, allowCopyFallback, !isFinder, !secure {
                 selected = Self.copySelection()
             }
             if let selected { context["selectedText"] = String(selected.prefix(8000)) }
 
-            if isFinder, let paths = Self.appleScript("""
+            if isFinder, MusicManager.mayAutomate(bundleID, ask: false), let paths = Self.appleScript("""
                 tell application "Finder"
                   set out to ""
                   repeat with f in (get selection as alias list)
@@ -129,13 +131,56 @@ extension SystemHelper {
                 let files = paths.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
                 if !files.isEmpty { context["finderSelection"] = Array(files.prefix(50)) }
             }
-            if let script = Self.browserScript(for: bundleID), let result = Self.appleScript(script) {
+            if let script = Self.browserScript(for: bundleID), MusicManager.mayAutomate(bundleID, ask: false),
+               let result = Self.appleScript(script) {
                 let parts = result.components(separatedBy: "\n")
                 if let url = parts.first, url.hasPrefix("http") { context["pageURL"] = url }
                 if parts.count > 1, !parts[1].isEmpty { context["pageTitle"] = parts[1] }
             }
+            if !secure, let window: AXUIElement = Self.attribute(app, kAXFocusedWindowAttribute) {
+                let readable = Self.readableWindowText(window)
+                if !readable.text.isEmpty { context["visibleText"] = readable.text }
+                if context["pageURL"] == nil, let url = readable.pageURL { context["pageURL"] = url }
+            }
             reply(try? JSONSerialization.data(withJSONObject: context))
         }
+    }
+
+    /// A bounded, read-only accessibility walk. No injected browser JavaScript or clipboard changes.
+    private static func readableWindowText(_ window: AXUIElement) -> (text: String, pageURL: String?) {
+        var pageURL: String?
+        let deadline = Date().addingTimeInterval(0.65)
+        var stack: [(AXUIElement, Int)] = [(window, 0)]
+        var snippets: [String] = []
+        var seen = Set<String>()
+        var count = 0
+        var length = 0
+        while let (node, depth) = stack.popLast(), count < 300, length < 12000, Date() < deadline {
+            count += 1
+            let subrole: String = attribute(node, kAXSubroleAttribute) ?? ""
+            if subrole == "AXSecureTextField" { continue }
+            let role: String = attribute(node, kAXRoleAttribute) ?? ""
+            if role == "AXWebArea", pageURL == nil {
+                let url: URL? = attribute(node, "AXURL")
+                let string: String? = attribute(node, "AXURL")
+                let candidate = url?.absoluteString ?? string ?? ""
+                if candidate.hasPrefix("https://") || candidate.hasPrefix("http://") { pageURL = candidate }
+            }
+            if ["AXStaticText", "AXTextArea", "AXHeading"].contains(role) {
+                let value: String? = attribute(node, kAXValueAttribute)
+                let title: String? = attribute(node, kAXTitleAttribute)
+                let text = (value ?? title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !text.isEmpty, seen.insert(text).inserted {
+                    let part = String(text.prefix(12000 - length))
+                    snippets.append(part)
+                    length += part.count + 1
+                }
+            }
+            guard depth < 18 else { continue }
+            let children: [AXUIElement] = attribute(node, kAXChildrenAttribute) ?? []
+            stack += children.prefix(100).reversed().map { ($0, depth + 1) }
+        }
+        return (snippets.joined(separator: "\n"), pageURL)
     }
 
     private static func browserScript(for bundleID: String) -> String? {

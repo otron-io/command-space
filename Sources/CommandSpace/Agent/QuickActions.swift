@@ -197,7 +197,7 @@ final class QuickActions {
     ]
 
     /// Returns a label/icon for the action that was performed, or nil if the agent should handle it.
-    func tryHandle(_ request: String) async -> (label: String, icon: String)? {
+    func tryHandle(_ request: String, useCapturedContext: Bool = true) async -> (label: String, icon: String)? {
         lastThisRefers = nil
         guard Defaults[.jevInstantActions], request.count <= 140 else { return nil }
         guard DecisionEngine.shared.decisionsAvailable else {
@@ -208,9 +208,9 @@ final class QuickActions {
         // Captured when the key went down (or when a typed request was sent); wait briefly.
         async let screenTask = ContextCapture.shared.context(maxWait: 0.5)
         async let menuTask = ContextCapture.shared.menuItems(maxWait: 0.4)
-        let screen = await screenTask
-        let menu = RequestParsing.rankMenuItems(await menuTask, for: request)
-        let frontApp = ContextCapture.shared.targetApp ?? "the current app"
+        let screen = useCapturedContext ? await screenTask : nil
+        let menu = useCapturedContext ? RequestParsing.rankMenuItems(await menuTask, for: request) : []
+        let frontApp = useCapturedContext ? (ContextCapture.shared.targetApp ?? "the current app") : "the current app"
 
         let apps = installedApps()
         if shortcuts.isEmpty || Date().timeIntervalSince(shortcutsFetchedAt) > 600 {
