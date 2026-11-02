@@ -87,7 +87,16 @@ struct AgentRow: View {
     var body: some View {
         switch item.kind {
         case .user:
-            Text(item.text)
+            VStack(alignment: .trailing, spacing: 8) {
+                ForEach(Array(item.images.enumerated()), id: \.offset) { _, image in
+                    if let preview = NSImage(data: image.data) {
+                        Image(nsImage: preview).resizable().scaledToFit()
+                            .frame(maxWidth: 260, maxHeight: 160)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+                }
+                Text(item.text)
+            }
                 .font(.system(size: 13))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 10)

@@ -1,10 +1,47 @@
-<h1 align="center">Command Space</h1>
+<p align="center">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="docs/media/command-space.png">
+    <img src="docs/media/command-space.gif" alt="Command Space — the animated Space character thinking, working, asking for approval, and celebrating" width="960">
+  </picture>
+</p>
 
-<p align="center">Spotlight, replaced. Apps, documents, commands and an AI agent behind ⌘Space.</p>
+<p align="center"><strong>Spotlight, replaced.</strong> Apps, documents, commands and an AI agent behind ⌘Space.</p>
+
+<p align="center">
+  <a href="https://github.com/otron-io/command-space/releases/latest">Download for macOS</a> ·
+  <a href="#install">Get started</a> ·
+  <a href="#two-systems">Choose your agent</a>
+</p>
 
 Press **⌘Space** and a black bubble opens in the upper middle of the screen, then stretches into a search bar. Start typing and results grow underneath. Type a name and you get the app or document. Type a question or a task and Space, the agent, takes it.
 
 Command Space grew out of [Notch Agent](https://github.com/MoMia7/boring.notch). It's the same agent with the same look, moved out of the notch and into a launcher.
+
+## See it in action
+
+<p align="center">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce)" srcset="docs/media/app-search.png">
+    <img src="docs/media/in-action.gif" alt="The real Command Space interface opening, searching Safari, converting units, calculating, previewing a volume command, showing selected-text context, and attaching an image" width="960">
+  </picture>
+</p>
+
+<table>
+  <tr>
+    <td width="50%"><strong>Your apps, a few letters away</strong><br><img src="docs/media/app-search.png" alt="Safari found in Command Space app search" width="460"><br>Search apps and quick opens without leaving what you’re doing.</td>
+    <td width="50%"><strong>Conversions without the cloud</strong><br><img src="docs/media/conversions.png" alt="Ten kilometres converted into miles, with Enter to copy" width="460"><br>Measurements, temperatures, data sizes, number bases. Instant and local.</td>
+  </tr>
+  <tr>
+    <td><strong>A calculator, too</strong><br><img src="docs/media/calculator.png" alt="Command Space calculating fifteen percent of eighty" width="460"><br>Type the expression. Press Enter to copy the answer.</td>
+    <td><strong>Know exactly what Enter will do</strong><br><img src="docs/media/instant-actions.png" alt="Set volume to 50 percent shown as a complete action before execution" width="460"><br>Filled-in System One actions, not vague command names.</td>
+  </tr>
+  <tr>
+    <td><strong>Ask about what you’re looking at</strong><br><img src="docs/media/screen-intelligence.png" alt="An example highlighted passage previewed before asking Space to explain it" width="460"><br>Selected text and source-window context, with control over what’s shared.</td>
+    <td><strong>Paste an image. Ask Space.</strong><br><img src="docs/media/image-paste.png" alt="An image pasted into Command Space with a removable attachment preview in System Two" width="460"><br>⌘V attaches images and switches to System Two. Add a question, then send.</td>
+  </tr>
+</table>
+
+<sub>Captured from the native app with public sample inputs; personal documents, learned actions, and conversation results are hidden. The highlighted passage is an example. Actions are previewed, not executed. Animated images have static alternatives for reduced-motion preferences.</sub>
 
 ## What you can type
 
@@ -75,6 +112,10 @@ Open **⌘Space** over the page or app you want to ask about, then type **“sum
 - **Control:** the viewfinder in the bar offers automatic context, explicit attachment, or exclusion. A preview strip shows what will be shared. A question about highlighted text sends just the passage, not the rest of the page/image, unless you ask about the whole window or explicitly attach it.
 - **Privacy:** context stays local until you send a relevant question or explicitly attach it, then goes to your chosen System Two harness and may be retained in its history. Images are not saved as screenshot files by Command Space. System One only gets metadata, never the selection, page text, or image. Turn text context or images off separately in General settings. Unrelated questions don't attach the screen. Continuing an old thread in the permanent window does not reuse an unrelated launcher capture.
 
+### Paste images
+
+**⌘V** pastes text with normal macOS selection and undo behavior. If the clipboard contains an image or a copied image file, Command Space attaches it and switches to **System Two** instead. Add a question and press **Enter**, or send the image alone for a description. You can attach up to four images and remove any thumbnail before sending. Pasting never sends automatically, does not require Screen Recording permission, and does not attach an unrelated screen. Use Codex, Claude Code, or a vision-capable opencode model.
+
 ## Without opening it
 
 - **Push-to-talk:** hold **right ⌥**, speak, release.
@@ -114,6 +155,7 @@ swift build && swift test                 # parsing, conversions, screen payload
 .build/debug/CommandSpace --query "saf"   # open the panel pre-filled (also --agent)
 .build/debug/CommandSpace --harness-image-check codex  # synthetic image test, no screen upload
 # Debug builds: add --snapshot /absolute/path/panel.png to --query to capture the app's own view and exit.
+.build/debug/CommandSpace --capture-readme /absolute/path/captures  # safe native-view captures + logo frames
 scripts/build-app.sh                      # → build/Command Space.app (signed, universal)
 scripts/build-app.sh --install            # … and copy to /Applications
 scripts/build-app.sh --dmg                # … and Command-Space.dmg + signed appcast.xml entry

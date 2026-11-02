@@ -211,6 +211,9 @@ final class SearchEngine: ObservableObject {
                               score: best - 0.06 + UsageStore.boost(for: command.id, query: q)))
         }
         for command in QuickActions.shared.commands {
+            #if DEBUG
+            if CommandLine.arguments.contains("--capture-readme"), command.learned { continue }
+            #endif
             let best = max(FuzzyMatch.score(q, in: command.title),
                            q.count >= 4 && command.detail.lowercased().contains(q) ? 0.58 : 0)
             guard best > 0.55 else { continue }
@@ -265,6 +268,12 @@ final class SearchEngine: ObservableObject {
             }
         }
 
+        #if DEBUG
+        // Documentation captures must never contain personal history, documents, or Shortcuts.
+        if CommandLine.arguments.contains("--capture-readme") {
+            list.removeAll { [.conversation, .document, .shortcut].contains($0.kind) }
+        }
+        #endif
         apply(snapAnswer, to: &list)
         list.sort { $0.score > $1.score }
         results = Array(list.prefix(30))

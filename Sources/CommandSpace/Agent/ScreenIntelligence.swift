@@ -19,11 +19,15 @@ struct AgentRequestContext: Equatable, Sendable {
     var image: ScreenImage?
     /// A truthful text-only version, when the source also supplied readable contents.
     var textOnlyFallback: String?
+    /// Explicitly pasted images are independent of screen-capture permissions and toggles.
+    var attachments: [ScreenImage]
+    var images: [ScreenImage] { (image.map { [$0] } ?? []) + attachments }
 
-    init(_ text: String, image: ScreenImage? = nil, textOnlyFallback: String? = nil) {
+    init(_ text: String, image: ScreenImage? = nil, textOnlyFallback: String? = nil, attachments: [ScreenImage] = []) {
         self.text = text
         self.image = image
         self.textOnlyFallback = textOnlyFallback
+        self.attachments = attachments
     }
 }
 
@@ -33,14 +37,14 @@ enum AgentInput {
         let hidden = [planning ? SpaceWorkspace.planInstruction : nil, context?.text].compactMap { $0 }
         let message = hidden.isEmpty ? text : SpaceWorkspace.wrap(context: hidden.joined(separator: "\n\n"), around: text)
         var input: [[String: Any]] = [["type": "text", "text": message]]
-        if let image = context?.image { input.append(["type": "image", "url": image.dataURL]) }
+        for image in context?.images ?? [] { input.append(["type": "image", "url": image.dataURL]) }
         return input
     }
 
     static func claude(_ text: String, context: AgentRequestContext?) -> [[String: Any]] {
         let message = context.map { SpaceWorkspace.wrap(context: $0.text, around: text) } ?? text
         var content: [[String: Any]] = [["type": "text", "text": message]]
-        if let image = context?.image {
+        for image in context?.images ?? [] {
             content.append(["type": "image", "source": ["type": "base64", "media_type": image.mimeType,
                                                           "data": image.data.base64EncodedString()]])
         }
@@ -61,9 +65,10 @@ enum AgentInput {
         var parts: [[String: Any]] = []
         if let context { parts.append(["type": "text", "text": context.text, "synthetic": true]) }
         parts.append(["type": "text", "text": text])
-        if let image = context?.image {
+        for (index, image) in (context?.images ?? []).enumerated() {
+            let ext = image.mimeType == "image/png" ? "png" : "jpg"
             parts.append(["type": "file", "mime": image.mimeType,
-                          "filename": image.mimeType == "image/png" ? "screen-context.png" : "screen-context.jpg", "url": image.dataURL])
+                          "filename": "image-\(index + 1).\(ext)", "url": image.dataURL])
         }
         return parts
     }

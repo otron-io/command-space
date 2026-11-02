@@ -37,6 +37,7 @@ struct CommandSpaceView: View {
     var body: some View {
         VStack(spacing: 10) {
             bar
+            ImageAttachmentStrip(images: $model.attachments, error: model.pasteError)
             if model.stage == .bar && model.showsCard {
                 card
                     .transition(.asymmetric(
@@ -151,6 +152,7 @@ struct CommandSpaceView: View {
 
     private var placeholder: String {
         if voice.isActive { return voice.transcript.isEmpty ? "Listening…" : voice.transcript }
+        if !model.attachments.isEmpty { return "Ask about the image\(model.attachments.count == 1 ? "" : "s")…" }
         if model.mode == .agent {
             let key = Defaults[.pushToTalkKey]
             return key == .off ? "Ask Space anything…" : "Ask Space anything… or hold \(key.shortName)"
@@ -173,13 +175,20 @@ struct CommandSpaceView: View {
 
     private var card: some View {
         VStack(spacing: 0) {
-            ScreenContextStrip(query: model.query)
+            ScreenContextStrip(query: model.attachments.isEmpty ? model.query : "")
             Group {
                 switch model.mode {
                 case .agent:
-                    AgentView(thread: agent.current, onPrefill: model.prefill)
-                        .padding(14)
-                        .frame(height: agentIsFresh ? 196 : Space.agentHeight)
+                    if agentIsFresh && !model.attachments.isEmpty {
+                        Text("Describe the image, read its text, or ask a question.")
+                            .font(.system(size: 13)).foregroundStyle(.gray)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(20)
+                    } else {
+                        AgentView(thread: agent.current, onPrefill: model.prefill)
+                            .padding(14)
+                            .frame(height: agentIsFresh ? 196 : Space.agentHeight)
+                    }
                 case .search:
                     if model.query.trimmingCharacters(in: .whitespaces).isEmpty {
                         AgentLiveStrip {

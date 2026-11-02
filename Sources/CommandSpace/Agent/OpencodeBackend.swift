@@ -44,7 +44,7 @@ final class OpencodeBackend: AgentBackend {
 
     func send(_ text: String, context: AgentRequestContext?, mode: AgentMode, to session: String) async throws {
         var context = context
-        if context?.image != nil {
+        if context?.images.isEmpty == false {
             var model = Defaults[.agentModelOverride]
             if model.isEmpty, let data = try? await request("GET", "/config"),
                let config = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
@@ -53,7 +53,7 @@ final class OpencodeBackend: AgentBackend {
             if let data = try? await request("GET", "/provider"),
                let providers = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                AgentInput.opencodeSupportsImages(providers, model: model) == false {
-                guard let fallback = context?.textOnlyFallback else {
+                guard context?.attachments.isEmpty == true, let fallback = context?.textOnlyFallback else {
                     throw NSError(domain: "CommandSpace.ScreenContext", code: 1, userInfo: [NSLocalizedDescriptionKey:
                         "\(model) is text-only. Choose a vision-capable model under Settings → System Two, or use Codex or Claude Code to ask about images."])
                 }

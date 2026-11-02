@@ -20,8 +20,11 @@ final class ThreadWindowController: NSObject, ObservableObject, NSWindowDelegate
     @Published private(set) var thread: AgentThread?
     @Published var draft = ""
     @Published var focusToken = 0
+    @Published var attachments: [ScreenImage] = []
+    @Published var pasteError: String?
 
     private var window: NSWindow?
+    private var pasteMonitor: Any?
 
     var isVisible: Bool { window?.isVisible == true }
     var isKey: Bool { window?.isKeyWindow == true }
@@ -41,6 +44,8 @@ final class ThreadWindowController: NSObject, ObservableObject, NSWindowDelegate
         if let thread { AgentManager.shared.observe(thread) }
         self.thread = thread
         draft = ""
+        attachments = []
+        pasteError = nil
         focusToken += 1
         AgentManager.shared.permissionsChanged()
     }
@@ -56,11 +61,34 @@ final class ThreadWindowController: NSObject, ObservableObject, NSWindowDelegate
 
     func send() {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty || !attachments.isEmpty else { return }
+        let images = attachments
         draft = ""
+        attachments = []
+        pasteError = nil
         let target = thread ?? AgentThread()
         if thread == nil { select(target) }
-        target.send(text, useCapturedContext: false)
+        target.send(text, useCapturedContext: false, images: images)
+    }
+
+    @discardableResult func paste(from pasteboard: NSPasteboard = .general, editor: NSTextView? = nil) -> Bool {
+        do {
+            let images = try ClipboardImages.read(from: pasteboard)
+            if !images.isEmpty {
+                guard attachments.count + images.count <= ClipboardImages.limit else { throw ClipboardImages.PasteError.tooMany }
+                attachments += images
+                pasteError = nil
+                focusToken += 1
+                return true
+            }
+            if let editor = editor ?? window?.firstResponder as? NSTextView {
+                return ClipboardImages.pasteText(from: pasteboard, into: editor)
+            }
+            return false
+        } catch {
+            pasteError = error.localizedDescription
+            return true
+        }
     }
 
     private func makeWindow() -> NSWindow {
@@ -79,6 +107,12 @@ final class ThreadWindowController: NSObject, ObservableObject, NSWindowDelegate
         window.center()
         window.setFrameAutosaveName("CommandSpaceConversations")
         window.delegate = self
+        if let pasteMonitor { NSEvent.removeMonitor(pasteMonitor) }
+        pasteMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self, weak window] event in
+            guard let self, let window, event.window === window,
+                  event.modifierFlags.contains(.command), event.charactersIgnoringModifiers == "v" else { return event }
+            return self.paste() ? nil : event
+        }
         return window
     }
 
@@ -401,25 +435,28 @@ private struct Composer: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            TextField(placeholder, text: $controller.draft, axis: .vertical)
-                .textFieldStyle(.plain)
-                .font(.system(size: 14))
-                .foregroundStyle(.white)
-                .lineLimit(1...8)
-                .focused($focused)
-                .onSubmit { controller.send() }
-                .padding(.vertical, 4)
-            Button { controller.send() } label: {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.black)
-                    .frame(width: 28, height: 28)
-                    .background(Circle().fill(Color.white.opacity(canSend ? 1 : 0.3)))
+        VStack(alignment: .leading, spacing: 8) {
+            ImageAttachmentStrip(images: $controller.attachments, error: controller.pasteError, width: nil)
+            HStack(alignment: .bottom, spacing: 10) {
+                TextField(placeholder, text: $controller.draft, axis: .vertical)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 14))
+                    .foregroundStyle(.white)
+                    .lineLimit(1...8)
+                    .focused($focused)
+                    .onSubmit { controller.send() }
+                    .padding(.vertical, 4)
+                Button { controller.send() } label: {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.black)
+                        .frame(width: 28, height: 28)
+                        .background(Circle().fill(Color.white.opacity(canSend ? 1 : 0.3)))
+                }
+                .buttonStyle(.plain)
+                .disabled(!canSend)
+                .help("Send (⏎)")
             }
-            .buttonStyle(.plain)
-            .disabled(!canSend)
-            .help("Send (⏎)")
         }
         .padding(.leading, 18)
         .padding(.trailing, 8)
@@ -434,7 +471,7 @@ private struct Composer: View {
         .onChange(of: controller.focusToken) { _, _ in focused = true }
     }
 
-    private var canSend: Bool { !controller.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    private var canSend: Bool { !controller.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !controller.attachments.isEmpty }
 
     private var placeholder: String {
         if voice.isActive { return voice.transcript.isEmpty ? "Listening…" : voice.transcript }

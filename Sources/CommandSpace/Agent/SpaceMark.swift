@@ -142,6 +142,8 @@ struct SpaceMark: View {
     var animated = true
     /// React to moments, the pointer and the voice level.
     var reactive = false
+    /// Export the same vector animation at a deterministic time (icons and README media).
+    var renderingTime: TimeInterval? = nil
 
     @State private var previousMood: SpaceMood = .idle
     @State private var moodChangedAt: TimeInterval = 0
@@ -149,7 +151,9 @@ struct SpaceMark: View {
 
     var body: some View {
         GeometryReader { geo in
-            if animated {
+            if let renderingTime {
+                frame(size: geo.size, t: renderingTime)
+            } else if animated {
                 TimelineView(.animation(minimumInterval: 1 / 60)) { context in
                     frame(size: geo.size, t: context.date.timeIntervalSinceReferenceDate)
                 }

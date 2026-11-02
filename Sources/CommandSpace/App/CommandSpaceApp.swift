@@ -15,6 +15,13 @@ import SwiftUI
 struct CommandSpaceMain {
     static func main() {
         let args = CommandLine.arguments
+        #if DEBUG
+        if let flag = args.firstIndex(of: "--capture-readme"), args.count > flag + 1 {
+            NSApplication.shared.setActivationPolicy(.prohibited)
+            MainActor.assumeIsolated { ReadmeCapture.run(into: URL(fileURLWithPath: args[flag + 1])) }
+            NSApplication.shared.run()
+        }
+        #endif
         if let flag = args.firstIndex(of: "--render-icon"), args.count > flag + 1 {
             let ok = MainActor.assumeIsolated { IconRenderer.render(into: URL(fileURLWithPath: args[flag + 1])) }
             exit(ok ? 0 : 1)
@@ -64,6 +71,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             updater = controller.updater
         }
 
+        AppMenus.install()
         installStatusItem()
         HotKeys.register()
         HotKeys.claimSpotlightShortcutIfAgreed()

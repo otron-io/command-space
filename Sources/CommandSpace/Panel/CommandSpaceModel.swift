@@ -27,6 +27,8 @@ final class CommandSpaceModel: ObservableObject {
     }
     @Published var mode: Mode = .search
     @Published var selection = 0
+    @Published var attachments: [ScreenImage] = []
+    @Published var pasteError: String?
     /// Drives the bubble → bar → results animation.
     @Published private(set) var stage: Stage = .hidden
     @Published var focusToken = 0
@@ -78,6 +80,8 @@ final class CommandSpaceModel: ObservableObject {
         if fresh {
             query = ""
             selection = 0
+            attachments = []
+            pasteError = nil
         }
     }
 
@@ -110,6 +114,29 @@ final class CommandSpaceModel: ObservableObject {
         query = ""
         mode = .search
         selection = 0
+        attachments = []
+        pasteError = nil
+    }
+
+    /// Image paste changes the route, never sends by itself. Text uses the native field editor.
+    @discardableResult func paste(from pasteboard: NSPasteboard = .general, editor: NSTextView? = nil) -> Bool {
+        do {
+            let images = try ClipboardImages.read(from: pasteboard)
+            if !images.isEmpty {
+                guard attachments.count + images.count <= ClipboardImages.limit else { throw ClipboardImages.PasteError.tooMany }
+                attachments += images
+                pasteError = nil
+                mode = .agent
+                focusField()
+                return true
+            }
+            let editor = editor ?? NSApp.keyWindow?.firstResponder as? NSTextView
+            if let editor { return ClipboardImages.pasteText(from: pasteboard, into: editor) }
+            return false
+        } catch {
+            pasteError = error.localizedDescription
+            return true
+        }
     }
 
     func focusField() { focusToken += 1 }
@@ -140,7 +167,7 @@ final class CommandSpaceModel: ObservableObject {
 
     // MARK: Keys
 
-    func handleKey(_ event: NSEvent) -> Bool {
+    func handleKey(_ event: NSEvent, pasteboard: NSPasteboard = .general, editor: NSTextView? = nil) -> Bool {
         let command = event.modifierFlags.contains(.command)
         switch event.keyCode {
         case 125: move(1); return true                       // ↓
@@ -162,7 +189,11 @@ final class CommandSpaceModel: ObservableObject {
         }
         guard command, let chars = event.charactersIgnoringModifiers else { return false }
         switch chars {
+        case "v":
+            return paste(from: pasteboard, editor: editor)
         case "n":
+            attachments = []
+            pasteError = nil
             agent.newThread()
             mode = .agent
             return true
@@ -194,7 +225,10 @@ final class CommandSpaceModel: ObservableObject {
     }
 
     private func escape() {
-        if !query.isEmpty {
+        if !attachments.isEmpty || pasteError != nil {
+            attachments = []
+            pasteError = nil
+        } else if !query.isEmpty {
             query = ""
         } else if mode == .agent {
             mode = .search
@@ -208,16 +242,24 @@ final class CommandSpaceModel: ObservableObject {
     func askSpace() {
         let text = query.trimmingCharacters(in: .whitespacesAndNewlines)
         withAnimation(.smooth(duration: 0.25)) { mode = .agent }
-        guard !text.isEmpty else { return }
+        guard !text.isEmpty || !attachments.isEmpty else { return }
+        let images = attachments
         query = ""
-        agent.send(text)
+        attachments = []
+        pasteError = nil
+        agent.send(text, images: images)
     }
 
     /// Moves the panel's conversation into the big window.
     func openInWindow() {
         let thread = agent.current
+        let draft = query, images = attachments
         onHide?()
-        ThreadWindowController.shared.show(thread.isEmpty ? nil : thread)
+        let controller = ThreadWindowController.shared
+        controller.show(thread.isEmpty ? nil : thread)
+        controller.draft = draft
+        controller.attachments = images
+        attachments = []
     }
 
     func showConversations() {
@@ -231,7 +273,7 @@ final class CommandSpaceModel: ObservableObject {
     }
 
     func activate() {
-        if mode == .agent {
+        if mode == .agent || !attachments.isEmpty {
             askSpace()
             return
         }
@@ -243,6 +285,7 @@ final class CommandSpaceModel: ObservableObject {
     }
 
     func perform(_ result: SearchResult) {
+        if !attachments.isEmpty { askSpace(); return }
         let typed = query
         UsageStore.recordPick(result.kind == .ask || result.kind == .web ? result.kind.rawValue : result.id, query: typed)
         switch result.action {
