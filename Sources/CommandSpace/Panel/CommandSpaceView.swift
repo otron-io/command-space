@@ -28,6 +28,8 @@ struct CommandSpaceView: View {
     @ObservedObject private var voice = VoiceInput.shared
     @ObservedObject private var monitor = AmbientMonitor.shared
     @FocusState private var fieldFocused: Bool
+    /// The field, placeholder and buttons only exist once the bubble has become the bar.
+    @State private var showsContent = false
 
     init(model: CommandSpaceModel) {
         self.model = model
@@ -36,28 +38,68 @@ struct CommandSpaceView: View {
 
     var body: some View {
         VStack(spacing: 10) {
-            bar
-            ImageAttachmentStrip(images: $model.attachments, error: model.pasteError)
-            if model.stage == .bar && model.showsCard {
-                card
-                    .transition(.asymmetric(
-                        insertion: .scale(scale: 0.97, anchor: .top).combined(with: .opacity),
-                        removal: .opacity))
+            // Chatting with Space reads like a chat: conversation above, input at the bottom.
+            if chatLayout {
+                cardIfShown
+                attachmentStrip
+                bar
+            } else {
+                bar
+                attachmentStrip
+                cardIfShown
             }
             Spacer(minLength: 0)
         }
         .padding(.top, 24)
+        .onChange(of: model.stage) { _, stage in
+            if stage == .bar {
+                // Let the bubble stretch most of the way before the contents fade in.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.14) {
+                    guard model.stage == .bar else { return }
+                    withAnimation(.easeOut(duration: 0.14)) { showsContent = true }
+                }
+            } else {
+                // Gone at once on the way out, so nothing spills past the shrinking bubble.
+                var transaction = Transaction()
+                transaction.disablesAnimations = true
+                withTransaction(transaction) { showsContent = false }
+            }
+        }
         .frame(width: CommandPanelController.size.width, height: CommandPanelController.size.height, alignment: .top)
         .animation(.spring(response: 0.34, dampingFraction: 0.84), value: model.showsCard)
         .animation(.spring(response: 0.34, dampingFraction: 0.84), value: model.mode)
         .environment(\.colorScheme, .dark)
-        .onChange(of: model.focusToken) { _, _ in
-            fieldFocused = true
-            // Cursor at the end, not everything selected (so "Remind me to " can be finished).
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return }
-                editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
-            }
+        .onChange(of: model.focusToken) { _, _ in focusField() }
+        .onChange(of: showsContent) { _, shown in if shown { focusField() } }
+    }
+
+    private func focusField() {
+        fieldFocused = true
+        // Cursor at the end, not everything selected (so "Remind me to " can be finished).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            guard let editor = NSApp.keyWindow?.firstResponder as? NSTextView else { return }
+            editor.setSelectedRange(NSRange(location: (editor.string as NSString).length, length: 0))
+        }
+    }
+
+    // MARK: Layout
+
+    private var chatLayout: Bool { model.mode == .agent }
+
+    @ViewBuilder
+    private var cardIfShown: some View {
+        if model.stage == .bar && model.showsCard {
+            card
+                .transition(.asymmetric(
+                    insertion: .scale(scale: 0.97, anchor: chatLayout ? .bottom : .top).combined(with: .opacity),
+                    removal: .opacity))
+        }
+    }
+
+    @ViewBuilder
+    private var attachmentStrip: some View {
+        if showsContent {
+            ImageAttachmentStrip(images: $model.attachments, error: model.pasteError)
         }
     }
 
@@ -73,18 +115,21 @@ struct CommandSpaceView: View {
             }
             .buttonStyle(.plain)
             .help(model.mode == .agent ? "Back to search (⇧⇥)" : "Ask Space (⇥)")
-            if expanded {
+            if expanded && showsContent {
                 field
-                    .transition(.opacity.combined(with: .move(edge: .leading)))
+                    .transition(.opacity)
                 ScreenContextControl()
                     .transition(.opacity)
                 trailing
                     .transition(.opacity)
+            } else if expanded {
+                Spacer(minLength: 0)
             }
         }
         .padding(.horizontal, expanded ? 16 : 0)
         .frame(width: expanded ? Space.barWidth : Space.barHeight, height: Space.barHeight)
         .background(Capsule(style: .continuous).fill(Space.black))
+        .clipShape(Capsule(style: .continuous))
         .overlay(Capsule(style: .continuous).strokeBorder(barStroke, lineWidth: voice.isActive ? 1.2 : 0.75))
         .shadow(color: .black.opacity(0.55), radius: 22, y: 10)
         .opacity(model.stage == .hidden ? 0 : 1)
@@ -175,6 +220,7 @@ struct CommandSpaceView: View {
 
     private var card: some View {
         VStack(spacing: 0) {
+            if chatLayout { footer }
             ScreenContextStrip(query: model.attachments.isEmpty ? model.query : "")
             Group {
                 switch model.mode {
@@ -201,7 +247,7 @@ struct CommandSpaceView: View {
                     }
                 }
             }
-            footer
+            if !chatLayout { footer }
         }
         .frame(width: Space.barWidth)
         .background(RoundedRectangle(cornerRadius: 26, style: .continuous).fill(Space.black))

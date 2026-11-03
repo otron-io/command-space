@@ -91,7 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `open -a "Command Space" --args --query "…"` opens the panel with that text (for scripts).
         let args = CommandLine.arguments
         if let flag = args.firstIndex(of: "--query"), args.count > flag + 1 {
-            CommandPanelController.shared.show(mode: .search)
+            CommandPanelController.shared.show(mode: args.contains("--agent") ? .agent : .search)
             #if DEBUG
             if args.contains("--screen-context-demo") {
                 var source = ScreenContext(app: "Screen intelligence demo", bundleID: nil)
@@ -103,8 +103,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             CommandPanelController.shared.model.query = args[flag + 1]
             #if DEBUG
             if let snapshot = args.firstIndex(of: "--snapshot"), args.count > snapshot + 1 {
+                let delay = args.firstIndex(of: "--snapshot-delay").flatMap { args.count > $0 + 1 ? Double(args[$0 + 1]) : nil } ?? 1
                 Task {
-                    try? await Task.sleep(for: .seconds(1))
+                    try? await Task.sleep(for: .seconds(delay))
                     let panel = CommandPanelController.shared
                     let ok = panel.saveSnapshot(to: URL(fileURLWithPath: args[snapshot + 1]))
                     print("panel snapshot: \(ok); selected: \(panel.model.selectedResult?.title ?? "none")")
