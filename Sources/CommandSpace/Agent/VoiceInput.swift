@@ -30,6 +30,8 @@ final class VoiceInput: ObservableObject {
     @Published private(set) var transcript = ""
     /// 0…1 microphone level for the waveform.
     @Published private(set) var level: Float = 0
+    /// Continuous listening (double-tap the talk key): each pause sends a command.
+    @Published var isContinuous = false
 
     private let engine = AVAudioEngine()
     private var session: AnyObject?  // VoiceSession (macOS 26+)

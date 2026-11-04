@@ -8,6 +8,7 @@
 //
 
 import AppKit
+import Defaults
 import Combine
 import SwiftUI
 
@@ -54,7 +55,7 @@ final class LivePillController {
 
     private var hasContent: Bool {
         let agent = AgentManager.shared
-        return VoiceInput.shared.isActive || agent.isRoutingVoice || agent.quickResult != nil
+        return VoiceInput.shared.isActive || VoiceInput.shared.isContinuous || agent.isRoutingVoice || agent.quickResult != nil
             || agent.anyBusy || agent.anyPermissions || AgentTimers.shared.next != nil
             || AmbientMonitor.shared.nudge != nil
     }
@@ -124,8 +125,10 @@ struct LivePillView: View {
     }
 
     private var content: Content? {
-        if voice.isActive {
-            return Content(mood: .listening, text: voice.transcript.isEmpty ? (voice.state == .finishing ? "Transcribing…" : "Listening…") : voice.transcript,
+        // In continuous mode, step progress shows between utterances.
+        if voice.isActive, !(voice.isContinuous && voice.transcript.isEmpty && manager.quickResult != nil) {
+            let idle = voice.isContinuous ? "Listening · tap \(Defaults[.pushToTalkKey].shortName) to stop" : "Listening…"
+            return Content(mood: .listening, text: voice.transcript.isEmpty ? (voice.state == .finishing ? "Transcribing…" : idle) : voice.transcript,
                            glow: Color(red: 1.0, green: 0.45, blue: 0.5).opacity(0.4 + 0.5 * Double(voice.level)))
         }
         if manager.isRoutingVoice { return Content(mood: .thinking, text: "On it…") }

@@ -146,7 +146,7 @@ final class ContextCapture: ObservableObject {
     }
 
     /// No clipboard simulation for typed requests. Push-to-talk may use the existing copy fallback.
-    func begin(allowCopyFallback: Bool) {
+    func begin(allowCopyFallback: Bool, captureImage: Bool = true) {
         clear()
         guard let app = frontmost else { return }
         let pid = app.processIdentifier
@@ -169,7 +169,7 @@ final class ContextCapture: ObservableObject {
                 textReady = true
                 isCapturing = !imageReady
             }
-            if Defaults[.screenImages], ScreenSnapshot.isAllowed, let id = ScreenSnapshot.windowID(for: pid) {
+            if captureImage, Defaults[.screenImages], ScreenSnapshot.isAllowed, let id = ScreenSnapshot.windowID(for: pid) {
                 imageReady = false
                 imageTask = Task {
                     do {

@@ -5,6 +5,7 @@
 //  Hold a single modifier key (Right Option by default) to talk to the agent.
 //  Audio starts on key-down so the first word isn't clipped; if another key is
 //  pressed within the hold threshold, it was a shortcut and the audio is discarded.
+//  Double-tap the key for continuous listening (every pause sends a command); tap to stop.
 //
 
 import AppKit
@@ -88,6 +89,12 @@ final class PushToTalk {
     private var duckedFrom: Float32?
     /// Hands-free listening started by the whistle trigger.
     private var handsFreeTask: Task<Void, Never>?
+    /// Presses shorter than this are taps (double-tap toggles continuous listening).
+    private let tapLimit: TimeInterval = 0.25
+    private let doubleTapWindow: TimeInterval = 0.45
+    private var lastTapAt: Date?
+    private var continuousTask: Task<Void, Never>?
+    private var isContinuous: Bool { continuousTask != nil }
 
     private init() {}
 
@@ -137,6 +144,12 @@ final class PushToTalk {
     }
 
     private func keyDown() {
+        // While listening continuously the key only matters as a tap (to stop).
+        if isContinuous {
+            pressedAt = Date()
+            confirmed = false
+            return
+        }
         handsFreeTask?.cancel()
         handsFreeTask = nil
         pressedAt = Date()
@@ -156,9 +169,27 @@ final class PushToTalk {
     }
 
     private func keyUp() {
-        guard pressedAt != nil else { return }
+        guard let pressed = pressedAt else { return }
         pressedAt = nil
         confirmTask?.cancel()
+        let isTap = Date().timeIntervalSince(pressed) < tapLimit
+        if isContinuous {
+            if isTap { stopContinuous() }
+            return
+        }
+        if isTap {
+            VoiceInput.shared.cancel()
+            restoreVolume()
+            confirmed = false
+            if let last = lastTapAt, Date().timeIntervalSince(last) < doubleTapWindow {
+                lastTapAt = nil
+                startContinuous()
+            } else {
+                lastTapAt = Date()
+            }
+            return
+        }
+        lastTapAt = nil
         guard confirmed else {
             VoiceInput.shared.cancel()
             return
@@ -197,8 +228,64 @@ final class PushToTalk {
         }
     }
 
+    // MARK: Continuous
+
+    private func startContinuous() {
+        guard continuousTask == nil else { return }
+        log.notice("continuous listening on")
+        VoiceInput.shared.isContinuous = true
+        NotificationCenter.default.post(name: .agentVoiceStarted, object: nil)
+        continuousTask = Task { [weak self] in
+            while !Task.isCancelled {
+                VoiceInput.shared.begin()
+                guard VoiceInput.shared.state == .listening else { break }  // no microphone access
+                let heard = await Self.waitForEndOfSpeech(patient: true)
+                guard !Task.isCancelled else { break }
+                guard heard else {
+                    // Long silence: restart the recognizer so sessions stay short.
+                    VoiceInput.shared.cancel()
+                    continue
+                }
+                let text = await VoiceInput.shared.end()
+                guard !Task.isCancelled else { break }
+                if Self.isStopPhrase(text) { break }
+                guard !text.isEmpty else { continue }
+                // One command at a time, each acting on whatever app is in front when it starts.
+                while StepRunner.shared.isRunning, !Task.isCancelled { try? await Task.sleep(for: .milliseconds(50)) }
+                if !CommandPanelController.shared.isVisible {
+                    ContextCapture.shared.begin(allowCopyFallback: false)
+                }
+                log.notice("continuous sending \(text.count) chars")
+                AgentManager.shared.sendFromVoice(text)
+            }
+            self?.finishContinuous()
+        }
+    }
+
+    private func stopContinuous() {
+        continuousTask?.cancel()
+        VoiceInput.shared.cancel()
+        finishContinuous()
+    }
+
+    private func finishContinuous() {
+        guard continuousTask != nil else { return }
+        continuousTask = nil
+        VoiceInput.shared.isContinuous = false
+        if VoiceInput.shared.state == .listening { VoiceInput.shared.cancel() }
+        log.notice("continuous listening off")
+    }
+
+    nonisolated static func isStopPhrase(_ text: String) -> Bool {
+        let clean = text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines.union(.punctuationCharacters))
+        return ["stop", "stop listening", "that's all", "that is all", "thats all", "done listening", "stop continuous"].contains(clean)
+    }
+
     /// Ends when the transcript stops changing, or when nothing is said at all.
-    private static func waitForEndOfSpeech() async {
+    /// - Parameter patient: wait up to a minute for speech to start (continuous mode).
+    /// - Returns: whether anything was said.
+    @discardableResult
+    private static func waitForEndOfSpeech(patient: Bool = false) async -> Bool {
         let started = Date()
         var lastText = ""
         var lastChange = Date()
@@ -210,9 +297,12 @@ final class PushToTalk {
                 lastChange = Date()
             }
             let elapsed = Date().timeIntervalSince(started)
-            if text.isEmpty ? elapsed > 4 : Date().timeIntervalSince(lastChange) > 1.0 { return }
-            if elapsed > 12 { return }
+            if text.isEmpty ? elapsed > (patient ? 50 : 4) : Date().timeIntervalSince(lastChange) > 1.0 { return !text.isEmpty }
+            // Long dictation still gets cut into commands.
+            if !text.isEmpty, Date().timeIntervalSince(lastChange) < 1.0, elapsed > (patient ? 60 : 12) { return true }
+            if !patient, elapsed > 12 { return !text.isEmpty }
         }
+        return !lastText.isEmpty
     }
 
     /// Halves the output volume while listening if something is playing, so you don't have to shout.
@@ -231,6 +321,12 @@ final class PushToTalk {
     }
 
     private func abort() {
+        lastTapAt = nil
+        if isContinuous {
+            // A shortcut with the talk key mustn't end the continuous session.
+            pressedAt = nil
+            return
+        }
         restoreVolume()
         pressedAt = nil
         confirmed = false
@@ -247,6 +343,11 @@ struct PushToTalkKeyPicker: View {
             ForEach(PushToTalkKey.allCases) { option in
                 Text(option.title).tag(option)
             }
+        }
+        if key != .off {
+            Text("Double-tap \(key.shortName) to keep listening: every pause runs a command. Tap once, or say “stop listening”, to end.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 }

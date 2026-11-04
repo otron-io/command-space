@@ -113,6 +113,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             #endif
+        } else if let flag = args.firstIndex(of: "--run"), args.count > flag + 1 {
+            // `open -a "Command Space" --args --run "…"` runs a request as if said (for scripts).
+            let request = args[flag + 1]
+            Task {
+                DecisionEngine.shared.warmUpLaya()
+                try? await Task.sleep(for: .seconds(3))
+                AgentManager.shared.sendFromVoice(request)
+            }
+        } else if let flag = args.firstIndex(of: "--dump-controls"), args.count > flag + 1,
+                  let app = NSRunningApplication.runningApplications(withBundleIdentifier: args[flag + 1]).first {
+            // Lists what System One can click in an app's front window (debugging computer use).
+            let lines = WindowControls.list(pid: app.processIdentifier).map(\.label)
+            try? lines.joined(separator: "\n").write(toFile: NSTemporaryDirectory() + "command-space-controls.txt", atomically: true, encoding: .utf8)
         } else if args.contains("--conversations") {
             ThreadWindowController.shared.show(nil)
             if let flag = args.firstIndex(of: "--conversations"), args.count > flag + 1, !args[flag + 1].hasPrefix("-") {

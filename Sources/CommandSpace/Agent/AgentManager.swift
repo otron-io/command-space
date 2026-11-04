@@ -270,7 +270,26 @@ final class AgentThread: ObservableObject, Identifiable {
             // Comprehension questions go straight to System Two, not a coincidentally matching
             // instant action. Ordinary "copy this link" and menu commands can still be instant.
             var refers: String?
-            if images.isEmpty && !ownedBySystemTwo && choice != .include && !screenQuestion {
+            // "Open Notes, make a new note and type hello": System One drives the Mac step by step.
+            var handoff: StepOutcome?
+            let steps = StepParsing.split(trimmed)
+            if images.isEmpty && !ownedBySystemTwo && choice != .include && !screenQuestion
+                && Defaults[.jevInstantActions] && StepRunner.shouldRun(steps) {
+                if showResult { manager.setRoutingVoice(true) }
+                let outcome = await StepRunner.shared.run(steps) { [manager] label in
+                    manager.setRoutingVoice(false)
+                    manager.flashResult(icon: "cursorarrow.click.2", label: label)
+                }
+                manager.setRoutingVoice(false)
+                if outcome.finished {
+                    items.append(AgentItem(id: UUID().uuidString, kind: .user, text: trimmed))
+                    items.append(AgentItem(id: UUID().uuidString, kind: .quick(icon: "cursorarrow.click.2"), text: outcome.done.joined(separator: " → ")))
+                    manager.flashResult(icon: "checkmark.circle.fill", label: outcome.done.count > 1 ? "Done · \(outcome.done.count) steps" : (outcome.done.first ?? "Done"))
+                    return
+                }
+                if !outcome.done.isEmpty { handoff = outcome }
+            }
+            if handoff == nil && images.isEmpty && !ownedBySystemTwo && choice != .include && !screenQuestion {
                 if showResult { manager.setRoutingVoice(true) }
                 let quick = await QuickActions.shared.tryHandle(trimmed, useCapturedContext: useCapturedContext && choice != .exclude)
                 refers = QuickActions.shared.lastThisRefers
@@ -284,6 +303,10 @@ final class AgentThread: ObservableObject, Identifiable {
             }
             showResultWhenDone = showResult
             items.append(AgentItem(id: UUID().uuidString, kind: .user, text: trimmed, images: images))
+            if let handoff {
+                items.append(AgentItem(id: UUID().uuidString, kind: .quick(icon: "cursorarrow.click.2"),
+                                       text: handoff.done.joined(separator: " → ") + " · handing the rest to System Two"))
+            }
             do {
                 if sessionID.isEmpty {
                     // A fresh conversation goes to the harness chosen in Settings right now.
@@ -316,6 +339,19 @@ final class AgentThread: ObservableObject, Identifiable {
                     }
                     context?.attachments = images
                     context?.textOnlyFallback = nil
+                }
+                if let handoff {
+                    // System One already did part of it on this Mac; System Two picks up from there.
+                    let note = "Command Space already did these steps on the user's Mac: " + handoff.done.joined(separator: "; ")
+                        + ". Do only what is left: " + handoff.remaining.joined(separator: ", then ")
+                        + ". The app the steps used is in front now."
+                    if let existing = context {
+                        context = AgentRequestContext(note + "\n\n" + existing.text, image: existing.image,
+                                                      textOnlyFallback: existing.textOnlyFallback.map { note + "\n\n" + $0 },
+                                                      attachments: existing.attachments)
+                    } else {
+                        context = AgentRequestContext(note)
+                    }
                 }
                 planReadyItemID = nil
                 try await backend.send(trimmed, context: context, mode: mode, to: sessionID)
