@@ -72,19 +72,22 @@ final class CommandPanelController: NSObject, NSWindowDelegate {
         peekTask?.cancel()
         isPeeking = false
         let wasVisible = panel.isVisible
+        // Take keyboard focus first: keys typed before the panel is key go to the previous app,
+        // so a fast "claude" would arrive as "ude". Letters typed before the field exists are
+        // kept by the key monitor (bufferEarlyTyping).
+        if !wasVisible { position() }
+        model.prepare(mode: mode, fresh: !wasVisible)
+        panel.makeKeyAndOrderFront(nil)
+        installKeyMonitor()
         if let thread {
             AgentManager.shared.makeCurrent(thread)
         } else if !wasVisible {
             AgentManager.shared.newThread()
         }
         if !wasVisible {
-            position()
             ContextCapture.shared.begin(allowCopyFallback: false)
             AppIndex.shared.refresh()
         }
-        model.prepare(mode: mode, fresh: !wasVisible)
-        panel.makeKeyAndOrderFront(nil)
-        installKeyMonitor()
         model.present()
         LivePillController.shared.refresh()
     }
@@ -193,8 +196,25 @@ final class CommandPanelController: NSObject, NSWindowDelegate {
             guard let self, event.window === self.panel else { return event }
             // Let input methods finish composing (Japanese, Chinese, accents…).
             if let editor = self.panel.firstResponder as? NSTextView, editor.hasMarkedText() { return event }
+            // Typed while the bar is still opening (no field yet): keep the letters, so a fast
+            // "claude" doesn't arrive as "ude". The field shows them once it appears.
+            if !(self.panel.firstResponder is NSTextView), self.bufferEarlyTyping(event) { return nil }
             return self.model.handleKey(event) ? nil : event
         }
+    }
+
+    private func bufferEarlyTyping(_ event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .control, .function])
+        guard modifiers.isEmpty, let characters = event.characters, !characters.isEmpty else { return false }
+        if event.keyCode == 51 {  // delete
+            guard !model.query.isEmpty else { return false }
+            model.query.removeLast()
+            return true
+        }
+        // Printable text only; return, tab, escape and arrows keep their usual meaning.
+        guard characters.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) && $0.value < 0xF700 }) else { return false }
+        model.query += characters
+        return true
     }
 
     private func removeKeyMonitor() {

@@ -74,11 +74,12 @@ enum SpotlightShortcut {
 @MainActor
 enum HotKeys {
     static func register() {
+        // Straight away, not via a Task: until the panel is key, typing goes to the previous app.
         KeyboardShortcuts.onKeyDown(for: .toggleCommandSpace) {
-            Task { @MainActor in CommandPanelController.shared.toggle(mode: .search) }
+            MainActor.assumeIsolated { CommandPanelController.shared.toggle(mode: .search) }
         }
         KeyboardShortcuts.onKeyDown(for: .askSpace) {
-            Task { @MainActor in CommandPanelController.shared.toggle(mode: .agent) }
+            MainActor.assumeIsolated { CommandPanelController.shared.toggle(mode: .agent) }
         }
     }
 
