@@ -266,6 +266,17 @@ final class AgentThread: ObservableObject, Identifiable {
             let choice: ContextCapture.Choice = useCapturedContext ? capture.choice : .automatic
             let screen = useCapturedContext && (images.isEmpty || choice == .include) ? await capture.context(maxWait: 2.5) : nil
             if choice == .include { capture.choice = .automatic }
+            // "Translate this to German": Apple's on-device translation answers in milliseconds.
+            if images.isEmpty && !ownedBySystemTwo, Translator.isAvailable,
+               let request = TranslationParsing.parse(trimmed, selection: choice != .exclude ? screen?.selectedText : nil),
+               case .success(let result) = await Translator.shared.translate(request) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(result.text, forType: .string)
+                items.append(AgentItem(id: UUID().uuidString, kind: .user, text: trimmed))
+                items.append(AgentItem(id: UUID().uuidString, kind: .quick(icon: "translate"), text: result.text))
+                manager.flashResult(icon: "translate", label: "Copied · \(result.text)", duration: 4)
+                return
+            }
             let screenQuestion = choice != .exclude && screen?.needsSystemTwo(for: trimmed) == true
             // Comprehension questions go straight to System Two, not a coincidentally matching
             // instant action. Ordinary "copy this link" and menu commands can still be instant.

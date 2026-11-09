@@ -27,7 +27,7 @@ extension Defaults.Keys {
 
 struct SearchResult: Identifiable, Equatable {
     enum Kind: String {
-        case app, document, folder, place, setting, command, system, web, address, calculation, conversion, ask, shortcut, conversation
+        case app, document, folder, place, setting, command, system, web, address, calculation, conversion, translation, ask, shortcut, conversation
 
         var label: String {
             switch self {
@@ -41,6 +41,7 @@ struct SearchResult: Identifiable, Equatable {
             case .address: "Open"
             case .calculation: "Calculator"
             case .conversion: "Converter"
+            case .translation: "Translation"
             case .ask: "Ask Space"
             case .shortcut: "Shortcut"
             case .conversation: "Conversation"
@@ -66,6 +67,8 @@ struct SearchResult: Identifiable, Equatable {
         case conversation(id: String)
         /// A System One command with everything filled in from what was typed.
         case resolved(ResolvedCommand)
+        /// Download a language pair for on-device translation.
+        case downloadTranslation(source: Locale.Language, target: Locale.Language)
     }
 
     let id: String
@@ -109,6 +112,8 @@ final class SearchEngine: ObservableObject {
         contextObserver = ContextCapture.shared.$captured.combineLatest(ContextCapture.shared.$choice)
             .dropFirst().receive(on: RunLoop.main).sink { [weak self] _ in
                 guard let self, !self.currentQuery.isEmpty else { return }
+                // The selection can arrive after typing started ("translate" + selected text).
+                self.scheduleTranslation(for: self.currentQuery)
                 self.rebuild()
                 self.scheduleSnap(for: self.currentQuery)
             }
@@ -134,6 +139,7 @@ final class SearchEngine: ObservableObject {
         }
         let localAnswer = Self.hasLocalAnswer(query)
         if localAnswer { files.cancel(); fileHits = [] }
+        scheduleTranslation(for: query)
         fileHits = fileHits.filter { $0.name.lowercased().contains(query.lowercased().split(separator: " ").first.map(String.init) ?? "") }
         rebuild()
         if CommandPreview.detect(query).contains("play_music") { scheduleMusic(for: query) } else { musicTask?.cancel() }
@@ -155,6 +161,9 @@ final class SearchEngine: ObservableObject {
         let q = query.lowercased()
         var list: [SearchResult] = []
 
+        if let request = Self.translationRequest(query), let row = translationRow(for: query, request) {
+            list.append(row)
+        }
         if let conversion = UnitConverter.evaluate(query) {
             list.append(.init(id: "convert", kind: .conversion, title: "= \(conversion.answer)",
                               subtitle: "\(conversion.source) · Converted on this Mac · ⏎ to copy",
@@ -337,10 +346,67 @@ final class SearchEngine: ObservableObject {
 
     private var pendingMusicQuery: String?
 
+    // MARK: Translation
+
+    private var translation: (query: String, selection: String?, outcome: Result<TranslationResult, TranslationFailure>)?
+    private var translationTask: Task<Void, Never>?
+
+    private static var selectedText: String? {
+        guard Defaults[.screenIntelligence], ContextCapture.shared.choice != .exclude else { return nil }
+        return ContextCapture.shared.captured?.selectedText
+    }
+
+    static func translationRequest(_ query: String) -> TranslationRequest? {
+        guard Translator.isAvailable else { return nil }
+        return TranslationParsing.parse(query, selection: selectedText)
+    }
+
+    private func scheduleTranslation(for query: String) {
+        guard let request = Self.translationRequest(query) else {
+            translationTask?.cancel()
+            return
+        }
+        if let translation, translation.query == query, translation.selection == Self.selectedText { return }
+        translationTask?.cancel()
+        translation = nil
+        let selection = Self.selectedText
+        translationTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(120))  // wait for a pause in typing
+            guard !Task.isCancelled else { return }
+            let outcome = await Translator.shared.translate(request)
+            guard !Task.isCancelled, let self, self.currentQuery == query else { return }
+            self.translation = (query, selection, outcome)
+            withAnimation(.smooth(duration: 0.18)) { self.rebuild() }
+        }
+    }
+
+    private func translationRow(for query: String, _ request: TranslationRequest) -> SearchResult? {
+        let icon = SearchResult.Icon.symbol("translate", .teal)
+        let target = TranslationParsing.displayName(request.target)
+        guard let translation, translation.query == query else {
+            return .init(id: "translate", kind: .translation, title: "Translating to \(target)…",
+                         subtitle: "On this Mac", icon: icon, action: .ask(query), score: 2.5)
+        }
+        switch translation.outcome {
+        case .success(let result):
+            return .init(id: "translate", kind: .translation, title: result.text,
+                         subtitle: "\(result.directionLabel) · Translated on this Mac · ⏎ to copy",
+                         icon: icon, action: .copy(result.text), score: 2.5)
+        case .failure(.needsDownload(let source, let target)):
+            return .init(id: "translate", kind: .translation,
+                         title: "Download \(TranslationParsing.displayName(source)) ↔ \(TranslationParsing.displayName(target)) for instant translation",
+                         subtitle: "One-time download from Apple, then translations run on this Mac · ⇥ asks Space instead",
+                         icon: .symbol("arrow.down.circle", .teal), action: .downloadTranslation(source: source, target: target), score: 2.5)
+        case .failure:
+            return nil
+        }
+    }
+
     // MARK: Snap 1
 
     static func hasLocalAnswer(_ query: String) -> Bool {
         UnitConverter.evaluate(query) != nil || UnitConverter.numberBase(query) != nil || Calculator.evaluate(query) != nil
+            || translationRequest(query) != nil
     }
 
     private func scheduleSnap(for query: String) {

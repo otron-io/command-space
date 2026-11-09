@@ -22,6 +22,22 @@ struct CommandSpaceMain {
             NSApplication.shared.run()
         }
         #endif
+        #if DEBUG
+        if let flag = args.firstIndex(of: "--translate"), args.count > flag + 1 {
+            // Prints an on-device translation and how long it took (debugging the translator).
+            Task { @MainActor in
+                guard let request = TranslationParsing.parse(args[flag + 1], selection: nil) else { print("not a translation"); exit(1) }
+                for _ in 0..<2 {
+                    let started = Date()
+                    let result = await Translator.shared.translate(request)
+                    print("\(Int(Date().timeIntervalSince(started) * 1000)) ms: \(result)")
+                }
+                exit(0)
+            }
+            NSApplication.shared.setActivationPolicy(.prohibited)
+            NSApplication.shared.run()
+        }
+        #endif
         if let flag = args.firstIndex(of: "--render-icon"), args.count > flag + 1 {
             let ok = MainActor.assumeIsolated { IconRenderer.render(into: URL(fileURLWithPath: args[flag + 1])) }
             exit(ok ? 0 : 1)

@@ -294,6 +294,9 @@ final class CommandSpaceModel: ObservableObject {
             onHide?()
         case .ask:
             askSpace()
+        case .downloadTranslation(let source, let target):
+            onHide?()
+            TranslationDownloader.shared.download(source: source, target: target)
         case .copy(let text):
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)

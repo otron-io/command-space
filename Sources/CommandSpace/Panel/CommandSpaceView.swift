@@ -19,6 +19,13 @@ enum Space {
     static let agentHeight: CGFloat = 400
     static let black = Color(red: 0, green: 0, blue: 0)
     static let hairline = Color.white.opacity(0.09)
+
+    /// Translations get room for a few lines; everything else is one row.
+    static func rowHeight(for result: SearchResult) -> CGFloat {
+        guard result.kind == .translation, case .copy = result.action else { return rowHeight }
+        let lines = min(4, max(1, Int((Double(result.title.count) / 62).rounded(.up))))
+        return lines == 1 ? rowHeight : CGFloat(30 + lines * 19)
+    }
 }
 
 struct CommandSpaceView: View {
@@ -264,7 +271,7 @@ struct CommandSpaceView: View {
 
     private var resultsList: some View {
         let rows = search.results
-        let visible = CGFloat(min(max(rows.count, 1), Space.maxRows))
+        let visibleHeight = rows.prefix(Space.maxRows).map { Space.rowHeight(for: $0) + 2 }.reduce(0, +)
         return ScrollViewReader { proxy in
             ScrollView(.vertical, showsIndicators: false) {
                 LazyVStack(spacing: 2) {
@@ -277,7 +284,7 @@ struct CommandSpaceView: View {
                 }
                 .padding(8)
             }
-            .frame(height: visible * (Space.rowHeight + 2) + 16)
+            .frame(height: max(visibleHeight, Space.rowHeight + 2) + 16)
             .onChange(of: model.selection) { _, index in
                 guard rows.indices.contains(index) else { return }
                 proxy.scrollTo(rows[index].id)
@@ -305,8 +312,9 @@ struct CommandSpaceView: View {
 
     @ViewBuilder
     private var footerStatus: some View {
-        if model.mode == .search, let selected = model.selectedResult, selected.kind == .conversion || selected.kind == .calculation {
-            Label(selected.kind == .conversion ? "Converter · on this Mac" : "Calculator · on this Mac", systemImage: "bolt.fill")
+        if model.mode == .search, let selected = model.selectedResult, [.conversion, .calculation, .translation].contains(selected.kind) {
+            Label(selected.kind == .conversion ? "Converter · on this Mac" : selected.kind == .translation ? "Translator · on this Mac" : "Calculator · on this Mac",
+                  systemImage: "bolt.fill")
                 .font(.system(size: 10.5, weight: .medium)).foregroundStyle(.cyan)
         } else if model.mode == .search, let intent = search.intent {
             HStack(spacing: 5) {
@@ -367,6 +375,10 @@ struct CommandSpaceView: View {
             if case .resolved(.spotify) = result.action { return "Play" }
             return "Run"
         case .calculation, .conversion: return "Copy"
+        case .translation:
+            if case .copy = result.action { return "Copy" }
+            if case .downloadTranslation = result.action { return "Download" }
+            return "Ask"
         case .ask: return "Ask"
         case .conversation: return "Continue"
         }
@@ -401,8 +413,8 @@ struct ResultRow: View {
                 Text(result.kind == .ask ? "“\(result.title)”" : result.title)
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                    .lineLimit(result.kind == .translation ? 4 : 1)
+                    .truncationMode(result.kind == .translation ? .tail : .middle)
                 Text(result.subtitle)
                     .font(.system(size: 11.5))
                     .foregroundStyle(.gray)
@@ -428,7 +440,7 @@ struct ResultRow: View {
             }
         }
         .padding(.horizontal, 10)
-        .frame(height: Space.rowHeight)
+        .frame(height: Space.rowHeight(for: result))
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Color.white.opacity(selected ? 0.11 : 0))
