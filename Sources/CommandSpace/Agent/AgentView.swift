@@ -315,6 +315,8 @@ struct PermissionCard: View {
     var body: some View {
         if let plan = permission.plan {
             PlanApprovalCard(plan: plan, onReply: onReply)
+        } else if permission.permission == ComputerTool.permissionKind {
+            ComputerApprovalCard(command: command, onReply: onReply)
         } else {
             commandCard
         }
@@ -356,6 +358,96 @@ struct PermissionCard: View {
                 .background(Capsule().fill(tint))
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// Asks before Space takes the mouse and keyboard, and walks through any macOS permission still missing.
+/// Sizes itself (hosts with a fixed height should use `fixedSize` for this kind).
+struct ComputerApprovalCard: View {
+    let command: String
+    let onReply: (String) -> Void
+
+    var body: some View {
+        // Re-checked every second so granting in System Settings shows up straight away.
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            content(ready: ComputerAccess.ready)
+        }
+    }
+
+    private func content(ready: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Let Space use your Mac?", systemImage: "cursorarrow.rays")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.yellow)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Space will see your screen and use the mouse and keyboard.")
+                if !command.isEmpty {
+                    Text("First: \(command)").lineLimit(1).truncationMode(.tail)
+                }
+                Text("Press esc any time to stop.").foregroundStyle(.secondary)
+            }
+            .font(.caption)
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            if !ready { checklist }
+            HStack(spacing: 6) {
+                replyButton("Deny", "reject", tint: .red.opacity(0.35))
+                Spacer()
+                replyButton("This conversation", "always", tint: .white.opacity(0.1), enabled: ready)
+                replyButton("This task", "once", tint: .green.opacity(0.45), enabled: ready)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(8)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+        .frame(maxWidth: .infinity, alignment: .top)
+    }
+
+    private var checklist: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(ComputerAccess.Requirement.allCases) { requirement in
+                let granted = ComputerAccess.isGranted(requirement)
+                HStack(spacing: 6) {
+                    Image(systemName: granted ? "checkmark.circle.fill" : "exclamationmark.circle")
+                        .font(.caption)
+                        .foregroundStyle(granted ? .green : .orange)
+                    Text(requirement.title).font(.caption.weight(.medium)).foregroundStyle(.white)
+                    Text(requirement.reason).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer(minLength: 0)
+                    if !granted {
+                        Button { ComputerAccess.request(requirement) } label: {
+                            Text("Grant…")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 2)
+                                .background(Capsule().fill(Color.orange.opacity(0.45)))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            if !ComputerAccess.isGranted(.screenRecording) {
+                Text("If it’s already switched on, quit and reopen Command Space.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    private func replyButton(_ title: String, _ reply: String, tint: Color, enabled: Bool = true) -> some View {
+        Button { onReply(reply) } label: {
+            Text(title)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(Capsule().fill(tint))
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
     }
 }
 

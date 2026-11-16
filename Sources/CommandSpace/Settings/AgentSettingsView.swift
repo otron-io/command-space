@@ -63,6 +63,7 @@ struct AgentSettings: View {
                     opencodeSections
                 } else {
                     HarnessModelSection(harness: harness)
+                    if harness == .codex { ComputerUseSection() }
                 }
             case .voice:
                 VoiceSettingsSection()

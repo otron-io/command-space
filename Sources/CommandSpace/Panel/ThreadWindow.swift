@@ -361,7 +361,7 @@ private struct ThreadTranscript: View {
                     thread.reply(to: permission, with: reply)
                 }
                 .frame(maxWidth: 760)
-                .frame(height: permission.plan == nil ? 150 : 340)
+                .modifier(PermissionCardHeight(permission: permission))
                 .padding(.horizontal, 32)
                 .padding(.bottom, 8)
                 .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -476,5 +476,18 @@ private struct Composer: View {
     private var placeholder: String {
         if voice.isActive { return voice.transcript.isEmpty ? "Listening…" : voice.transcript }
         return thread?.ownedBySystemTwo == true ? "Reply to Space…" : "Ask Space anything…"
+    }
+}
+
+/// Command cards are 150 pt and plans 340; the computer card is as tall as its checklist needs.
+private struct PermissionCardHeight: ViewModifier {
+    let permission: AgentPermission
+
+    func body(content: Content) -> some View {
+        if permission.permission == ComputerTool.permissionKind {
+            content.fixedSize(horizontal: false, vertical: true)
+        } else {
+            content.frame(height: permission.plan == nil ? 150 : 340)
+        }
     }
 }

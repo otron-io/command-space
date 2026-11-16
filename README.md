@@ -85,7 +85,7 @@ Old threads are in the **conversations window**: press ⌘Y in the panel, or use
 | Harness | Billing | Notes |
 |---|---|---|
 | [opencode](https://opencode.ai) | ChatGPT login, an API key, or a local model | Runs as a background service (see Install). |
-| [Codex](https://github.com/openai/codex) | Your **ChatGPT** plan, from `codex login` | Command Space drives `codex app-server`. Commands Codex knows are read-only run straight away. |
+| [Codex](https://github.com/openai/codex) | Your **ChatGPT** plan, from `codex login` | Command Space drives `codex app-server`. Commands Codex knows are read-only run straight away. Can use the computer. |
 | [Claude Code](https://claude.com/claude-code) | Your **Claude** plan, from logging in to `claude` | Command Space drives `claude` in its SDK streaming mode, one process per conversation. |
 
 Command Space finds the Codex and Claude Code CLIs on its own and shows whether each is signed in. It never stores a key for them. It also removes `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`-style variables before launching them, and it won't run either CLI while it's signed in with an API key. New conversations use the selected harness, and existing ones stay on the harness they started on. Conversation history lists all of them.
@@ -115,6 +115,24 @@ Open **⌘Space** over the page or app you want to ask about, then type **“sum
 ### Paste images
 
 **⌘V** pastes text with normal macOS selection and undo behavior. If the clipboard contains an image or a copied image file, Command Space attaches it and switches to **System Two** instead. Add a question and press **Enter**, or send the image alone for a description. You can attach up to four images and remove any thumbnail before sending. Pasting never sends automatically, does not require Screen Recording permission, and does not attach an unrelated screen. Use Codex, Claude Code, or a vision-capable opencode model.
+
+## Computer use
+
+On Codex, Space can look at the screen and use the mouse and keyboard when a task needs an app's own interface. Command-line runs use `gpt-6.1-terra` by default; change it in **Settings → System Two → Computer use**. The System One step runner is separate and unchanged.
+
+- **macOS permissions:** Accessibility and Screen Recording. The approval card and Settings show a **Grant** button for each.
+- **In the app,** Space asks before taking control: **This task** or **This conversation**. Plan mode can only look, and Full access doesn't ask. A conversation you start as computer use from the command line is already approved for control.
+- **Stopping:** esc stops it at any time. It won't type into password fields, it won't type at all if you've switched to another app since it last looked, it does nothing while the screen is locked, and it's told to stop and ask before anything that sends, buys or deletes.
+
+```sh
+CommandSpace --computer-use "open Calculator and compute 17 * 23"
+CommandSpace --computer-use "find the Wi-Fi settings" --model gpt-6.1-terra
+answer=$(CommandSpace --computer-use "what is the frontmost window's title?")
+CommandSpace --computer-use "…" --standalone    # run in this terminal, not in the app
+CommandSpace --computer-use "…" --json          # one JSON message per line
+```
+
+If Command Space is running, the command hands the task to it and streams progress back. Otherwise, or with `--standalone`, it runs in the terminal process, and then the two macOS permissions belong to your terminal app.
 
 ## Without opening it
 
@@ -154,6 +172,8 @@ Requires macOS 14+. Voice input needs macOS 26+.
 swift build && swift test                 # parsing, conversions, screen payloads, harnesses, search, whistles
 .build/debug/CommandSpace --query "saf"   # open the panel pre-filled (also --agent)
 .build/debug/CommandSpace --harness-image-check codex  # synthetic image test, no screen upload
+.build/debug/CommandSpace --computer-use "task"         # computer use from the command line (--standalone, --json)
+.build/debug/CommandSpace --computer-actions '<json>'   # run computer-tool actions directly, no model (--save path.jpg)
 # Debug builds: add --snapshot /absolute/path/panel.png to --query to capture the app's own view and exit.
 .build/debug/CommandSpace --capture-readme /absolute/path/captures  # safe native-view captures + logo frames
 scripts/build-app.sh                      # → build/Command Space.app (signed, universal)
@@ -168,7 +188,7 @@ The app is a SwiftPM package. `build-app.sh` builds it with `xcodebuild` so pack
 Layout:
 - `Panel/`: the bubble, results, and live pill
 - `Search/`: apps, files, quick opens, the calculator, usage learning, and Snap 1 ranking
-- `Agent/`: System One and System Two, carried over from Notch Agent. `AgentBackend.swift` is the harness contract; `OpencodeBackend`, `CodexBackend` and `ClaudeBackend` implement it. Run `CommandSpace --harness-check codex` (or `claudeCode`, `opencode`) to test a harness end to end without UI.
+- `Agent/`: System One and System Two, carried over from Notch Agent. `AgentBackend.swift` is the harness contract; `OpencodeBackend`, `CodexBackend` and `ClaudeBackend` implement it. Run `CommandSpace --harness-check codex` (or `claudeCode`, `opencode`) to test a harness end to end without UI. The `computer` tool lives in `ComputerTool.swift` (rules and approvals) and `ComputerToolDriver.swift` (the Mac side), with `Parsing/ComputerActions.swift` for its arguments; `App/ControlChannel.swift` and `App/ComputerUseCLI.swift` are the command-line entry point.
 - `Settings/`
 - `System/`: volume, brightness, media, calendar, battery
 

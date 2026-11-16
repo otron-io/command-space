@@ -234,3 +234,54 @@ struct HarnessModeSection: View {
         .onChange(of: harness) { selection = harness.defaultMode }
     }
 }
+
+/// Computer use: Space looks at the screen and drives the mouse and keyboard (Codex only for now).
+struct ComputerUseSection: View {
+    @ObservedObject private var manager = AgentManager.shared
+    @Default(.computerUseEnabled) private var enabled
+    @Default(.computerUseModel) private var model
+
+    var body: some View {
+        Section {
+            Toggle("Let Space use the computer", isOn: $enabled)
+            if enabled {
+                // Re-checked every second so granting in System Settings shows up straight away.
+                TimelineView(.periodic(from: .now, by: 1)) { _ in
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(ComputerAccess.Requirement.allCases) { requirement in
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(requirement.title)
+                                    Text(requirement.reason)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if ComputerAccess.isGranted(requirement) {
+                                    Text("Granted").foregroundStyle(.green)
+                                } else {
+                                    Button("Grant…") { ComputerAccess.request(requirement) }
+                                }
+                            }
+                        }
+                    }
+                }
+                Picker("Model for command-line runs", selection: $model) {
+                    Text("Codex default").tag("")
+                    ForEach(manager.codexModels, id: \.id) { option in
+                        Text(option.name).tag(option.id)
+                    }
+                    if !model.isEmpty, !manager.codexModels.contains(where: { $0.id == model }) {
+                        Text(model).tag(model)
+                    }
+                }
+            }
+        } header: {
+            Text("Computer use")
+        } footer: {
+            Text("Space can look at the screen and use the mouse and keyboard when a task needs an app’s own interface. It asks before taking control — once per task, or once per conversation — and esc stops it. New Codex conversations pick this up. From Terminal: CommandSpace --computer-use \"…\".")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+    }
+}

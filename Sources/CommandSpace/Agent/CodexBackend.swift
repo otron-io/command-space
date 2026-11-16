@@ -33,6 +33,12 @@ final class CodexBackend: AgentBackend {
     /// Approval id -> the JSON-RPC request id to answer, and what kind of approval it is.
     private var approvals: [String: (rpcID: Any, method: String)] = [:]
     private var commandNames: [String: String] = [:]
+    /// Each session's current mode, for the computer tool's plan/full-access rules.
+    private var modes: [String: AgentMode] = [:]
+    /// Models chosen when a session was created (computer-use conversations), overriding the Settings model.
+    private var sessionModels: [String: String] = [:]
+    /// An older Codex rejected `dynamicTools`: don't offer the computer tool again this run.
+    private var dynamicToolsUnsupported = false
 
     private func notify(_ changed: Bool) { if changed { AgentBackendSink.changed(harness) } }
 
@@ -68,7 +74,8 @@ final class CodexBackend: AgentBackend {
             self.process = process
             do {
                 _ = try await call("initialize", ["clientInfo": ["name": "command-space", "title": "Command Space",
-                                                                 "version": Self.appVersion]])
+                                                                 "version": Self.appVersion],
+                                                     "capabilities": ["experimentalApi": true]])
                 process.send(["method": "initialized"])
                 try await checkAccount()
                 restartDelay = 1
@@ -88,6 +95,7 @@ final class CodexBackend: AgentBackend {
         process?.terminate()
         failPending()
         loaded = []
+        for session in activeTurn.keys { ComputerTool.shared.turnEnded(session) }
         activeTurn = [:]
         connection = .connecting
     }
@@ -102,7 +110,10 @@ final class CodexBackend: AgentBackend {
             AgentBackendSink.event(harness, permission.sessionID, .permissionResolved(permission.id))
         }
         openPermissions = [:]
-        for session in activeTurn.keys { AgentBackendSink.event(harness, session, .busy(false)) }
+        for session in activeTurn.keys {
+            ComputerTool.shared.turnEnded(session)
+            AgentBackendSink.event(harness, session, .busy(false))
+        }
         activeTurn = [:]
         let tail = stderr.split(separator: "\n").last.map(String.init) ?? "exit \(status)"
         connection = .offline("Codex stopped (\(tail)). Restarting…")
@@ -139,22 +150,45 @@ final class CodexBackend: AgentBackend {
             "cwd": SpaceWorkspace.url.path,
             "approvalPolicy": "untrusted",
             "sandbox": "danger-full-access",
-            "developerInstructions": SpaceWorkspace.instructions,
+            "developerInstructions": SpaceWorkspace.instructions
+                + (Defaults[.computerUseEnabled] ? "\n\n" + ComputerActions.instructions : ""),
         ]
         let model = Defaults[.codexModel]
         if !model.isEmpty { settings["model"] = model }
         return settings
     }
 
-    func createSession() async throws -> String {
+    func createSession() async throws -> String { try await createSession(model: nil) }
+
+    /// `model` overrides the Settings model for this conversation (computer use from the command line).
+    func createSession(model: String?) async throws -> String {
         try await ready()
         var params = threadSettings
         params["serviceName"] = "Command Space"
-        let result = try await call("thread/start", params) as? [String: Any]
+        if let model, !model.isEmpty { params["model"] = model }
+        let withTools = Defaults[.computerUseEnabled] && !dynamicToolsUnsupported
+        let result: [String: Any]?
+        if withTools {
+            var attempt = params
+            attempt["dynamicTools"] = [ComputerActions.codexToolSpec]
+            do {
+                result = try await call("thread/start", attempt) as? [String: Any]
+            } catch {
+                // Only a Codex that doesn't know the field loses the tool for good; anything else may be passing.
+                let reason = error.localizedDescription.lowercased()
+                if ["dynamic", "experimental", "unknown field"].contains(where: reason.contains) {
+                    dynamicToolsUnsupported = true
+                }
+                result = try await call("thread/start", params) as? [String: Any]
+            }
+        } else {
+            result = try await call("thread/start", params) as? [String: Any]
+        }
         guard let thread = result?["thread"] as? [String: Any], let id = thread["id"] as? String else {
             throw CodexError(message: "Codex didn’t start a conversation")
         }
         loaded.insert(id)
+        if let model, !model.isEmpty { sessionModels[id] = model }
         return id
     }
 
@@ -168,10 +202,11 @@ final class CodexBackend: AgentBackend {
         }
     }
 
-    func setMode(_ mode: AgentMode, for session: String) {}
+    func setMode(_ mode: AgentMode, for session: String) { modes[session] = mode }
 
     func send(_ text: String, context: AgentRequestContext?, mode: AgentMode, to session: String) async throws {
         try await ready()
+        modes[session] = mode
         if !loaded.contains(session) {
             var params = threadSettings
             params["threadId"] = session
@@ -182,7 +217,7 @@ final class CodexBackend: AgentBackend {
         let policy = Self.policy(for: mode)
         var params: [String: Any] = ["threadId": session, "input": AgentInput.codex(text, context: context, planning: mode == .plan),
                                      "approvalPolicy": policy.approval, "sandboxPolicy": policy.sandbox]
-        let model = Defaults[.codexModel]
+        let model = sessionModels[session] ?? Defaults[.codexModel]
         if !model.isEmpty { params["model"] = model }
         AgentBackendSink.event(harness, session, .busy(true))
         do {
@@ -200,6 +235,7 @@ final class CodexBackend: AgentBackend {
     }
 
     func reply(to permission: AgentPermission, with reply: PermissionReply) {
+        if ComputerTool.shared.resolve(permission, with: reply) { return }
         guard let approval = approvals.removeValue(forKey: permission.id) else { return }
         let decision: String
         switch reply {
@@ -253,6 +289,7 @@ final class CodexBackend: AgentBackend {
         }
         let busy = ((thread["status"] as? [String: Any])?["type"] as? String) == "active"
         let pendingHere = openPermissions.values.filter { $0.sessionID == session }
+            + ComputerTool.shared.pendingPermissions(for: session)
         return AgentSnapshot(items: items, permissions: pendingHere, busy: busy, title: thread["name"] as? String)
     }
 
@@ -355,6 +392,19 @@ final class CodexBackend: AgentBackend {
             permissionRequests[approvalID] = params["permissions"] as? [String: Any] ?? [:]
             emitPermission(approvalID, session: session, kind: "permissions",
                            pattern: (params["reason"] as? String) ?? "Extra access", callID: callID)
+        case "item/tool/call":
+            let arguments = params["arguments"]
+            guard params["tool"] as? String == ComputerActions.toolName else {
+                respond(id, ["contentItems": [["type": "inputText", "text": "Unknown tool"]], "success": false])
+                return
+            }
+            let mode = modes[session] ?? .ask
+            Task {
+                let result = await ComputerTool.shared.call(arguments: arguments, session: session, harness: harness, mode: mode)
+                var items: [[String: Any]] = [["type": "inputText", "text": result.text]]
+                if let image = result.image { items.append(["type": "inputImage", "imageUrl": image.dataURL]) }
+                respond(id, ["contentItems": items, "success": result.success])
+            }
         case "mcpServer/elicitation/request":
             process?.send(["id": id, "result": ["action": "decline"]])
         case "item/tool/requestUserInput":
@@ -385,6 +435,7 @@ final class CodexBackend: AgentBackend {
             send(.busy(true))
         case "turn/completed":
             activeTurn[session] = nil
+            ComputerTool.shared.turnEnded(session)
             let turn = params["turn"] as? [String: Any]
             if turn?["status"] as? String == "failed",
                let message = (turn?["error"] as? [String: Any])?["message"] as? String {
@@ -394,7 +445,8 @@ final class CodexBackend: AgentBackend {
             send(.busy(false))
         case "item/started", "item/completed":
             guard let raw = params["item"] as? [String: Any] else { return }
-            if raw["type"] as? String == "agentMessage" || raw["type"] as? String == "commandExecution" {
+            if raw["type"] as? String == "agentMessage" || raw["type"] as? String == "commandExecution"
+                || raw["type"] as? String == "dynamicToolCall" {
                 if method == "item/started" { send(.step) }
             }
             if let item = makeItem(raw, includeUser: false) {
@@ -469,6 +521,11 @@ final class CodexBackend: AgentBackend {
             var status = Self.status(raw["status"] as? String)
             if raw["error"] as? [String: Any] != nil { status = "error" }
             return AgentItem(id: id, kind: .tool(name: name, status: status), text: "", callID: id)
+        case "dynamicToolCall":
+            var status = Self.status(raw["status"] as? String)
+            if raw["success"] as? Bool == false { status = "error" }
+            return AgentItem(id: id, kind: .tool(name: raw["tool"] as? String ?? "tool", status: status),
+                             text: ComputerActions.summary(of: raw["arguments"]), callID: id)
         case "webSearch":
             return AgentItem(id: id, kind: .tool(name: "websearch", status: "completed"),
                              text: raw["query"] as? String ?? "", callID: id)
