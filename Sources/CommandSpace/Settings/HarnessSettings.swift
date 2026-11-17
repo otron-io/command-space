@@ -240,31 +240,40 @@ struct ComputerUseSection: View {
     @ObservedObject private var manager = AgentManager.shared
     @Default(.computerUseEnabled) private var enabled
     @Default(.computerUseModel) private var model
+    @State private var granted = Self.grants()
+    // Re-checked every second, also while another app (System Settings) is in front, so a
+    // permission granted there shows up straight away. TimelineView pauses in the background.
+    private let recheck = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private static func grants() -> [ComputerAccess.Requirement: Bool] {
+        Dictionary(uniqueKeysWithValues: ComputerAccess.Requirement.allCases.map { ($0, ComputerAccess.isGranted($0)) })
+    }
 
     var body: some View {
         Section {
             Toggle("Let Space use the computer", isOn: $enabled)
             if enabled {
-                // Re-checked every second so granting in System Settings shows up straight away.
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(ComputerAccess.Requirement.allCases) { requirement in
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(requirement.title)
-                                    Text(requirement.reason)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                                Spacer()
-                                if ComputerAccess.isGranted(requirement) {
-                                    Text("Granted").foregroundStyle(.green)
-                                } else {
-                                    Button("Grant…") { ComputerAccess.request(requirement) }
-                                }
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(ComputerAccess.Requirement.allCases) { requirement in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(requirement.title)
+                                Text(requirement.reason)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if granted[requirement] == true {
+                                Text("Granted").foregroundStyle(.green)
+                            } else {
+                                Button("Grant…") { ComputerAccess.request(requirement) }
                             }
                         }
                     }
+                }
+                .onReceive(recheck) { _ in
+                    let now = Self.grants()
+                    if now != granted { granted = now }
                 }
                 Picker("Model for command-line runs", selection: $model) {
                     Text("Codex default").tag("")

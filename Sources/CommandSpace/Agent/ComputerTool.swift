@@ -79,7 +79,7 @@ final class ComputerTool: ObservableObject {
             let reply = await askApproval(arguments: arguments, session: session, harness: harness)
             switch reply {
             case .reject:
-                return fail("The user declined to let you control the computer. Do not try again; ask what they would like instead.")
+                return fail("The user declined to let you see or control the computer. Respect that: don't try again, and don't look at or control the screen or apps any other way either (no screencapture, AppleScript, osascript or System Events). Tell the user you didn't, and ask what they would like instead.")
             case .once: taskGrants.insert(session)
             case .always: conversationGrants.insert(session)
             }
