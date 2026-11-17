@@ -189,9 +189,18 @@ final class AgentThread: ObservableObject, Identifiable {
     private var manager: AgentManager { .shared }
     private var backend: AgentBackend { manager.backend(harness) }
 
-    init(sessionID: String = "", harness: SystemTwoHarness? = nil, title: String = "") {
+    /// Started explicitly as computer use (command line, scripts): Codex only, no instant paths, control pre-approved.
+    private(set) var computerUse: Bool
+    private var computerUseRequest: Task<Void, Never>?
+    /// Model for a computer-use conversation; nil = the harness's own.
+    private(set) var model: String?
+
+    init(sessionID: String = "", harness: SystemTwoHarness? = nil, title: String = "",
+         computerUse: Bool = false, model: String? = nil) {
         self.sessionID = sessionID
-        let harness = harness ?? Defaults[.systemTwoHarness]
+        self.computerUse = computerUse
+        self.model = model
+        let harness = computerUse ? .codex : (harness ?? Defaults[.systemTwoHarness])
         self.harness = harness
         self.mode = harness.defaultMode
         self.title = title
@@ -231,6 +240,8 @@ final class AgentThread: ObservableObject, Identifiable {
     /// (Harnesses with a native equivalent never send these in the first place.)
     private func autoApproves(_ permission: AgentPermission) -> Bool {
         guard permission.plan == nil else { return false }
+        // Only shown when really needed, even in Full access (e.g. a macOS permission is missing).
+        guard permission.permission != ComputerTool.permissionKind else { return false }
         switch mode {
         case .fullAccess: return true
         case .acceptEdits: return permission.isEdit
@@ -257,17 +268,19 @@ final class AgentThread: ObservableObject, Identifiable {
         guard !trimmed.isEmpty else { return }
         SpaceMarkEvents.fire(.send)
         lastActivityAt = Date()
-        Task {
+        let request = Task {
+            guard !Task.isCancelled else { return }
             followUp = nil
             learnOffer = nil
             // The panel and push-to-talk captured the source at invocation. Never recapture here:
             // the selected text may be gone and the source may now be Command Space itself.
             let capture = ContextCapture.shared
+            let useCapturedContext = useCapturedContext && !computerUse
             let choice: ContextCapture.Choice = useCapturedContext ? capture.choice : .automatic
             let screen = useCapturedContext && (images.isEmpty || choice == .include) ? await capture.context(maxWait: 2.5) : nil
             if choice == .include { capture.choice = .automatic }
             // "Translate this to German": Apple's on-device translation answers in milliseconds.
-            if images.isEmpty && !ownedBySystemTwo, Translator.isAvailable,
+            if images.isEmpty && !ownedBySystemTwo && !computerUse, Translator.isAvailable,
                let request = TranslationParsing.parse(trimmed, selection: choice != .exclude ? screen?.selectedText : nil),
                case .success(let result) = await Translator.shared.translate(request) {
                 NSPasteboard.general.clearContents()
@@ -284,7 +297,7 @@ final class AgentThread: ObservableObject, Identifiable {
             // "Open Notes, make a new note and type hello": System One drives the Mac step by step.
             var handoff: StepOutcome?
             let steps = StepParsing.split(trimmed)
-            if images.isEmpty && !ownedBySystemTwo && choice != .include && !screenQuestion
+            if images.isEmpty && !ownedBySystemTwo && !computerUse && choice != .include && !screenQuestion
                 && Defaults[.jevInstantActions] && StepRunner.shouldRun(steps) {
                 if showResult { manager.setRoutingVoice(true) }
                 let outcome = await StepRunner.shared.run(steps) { [manager] label in
@@ -300,7 +313,7 @@ final class AgentThread: ObservableObject, Identifiable {
                 }
                 if !outcome.done.isEmpty { handoff = outcome }
             }
-            if handoff == nil && images.isEmpty && !ownedBySystemTwo && choice != .include && !screenQuestion {
+            if handoff == nil && images.isEmpty && !ownedBySystemTwo && !computerUse && choice != .include && !screenQuestion {
                 if showResult { manager.setRoutingVoice(true) }
                 let quick = await QuickActions.shared.tryHandle(trimmed, useCapturedContext: useCapturedContext && choice != .exclude)
                 refers = QuickActions.shared.lastThisRefers
@@ -321,12 +334,18 @@ final class AgentThread: ObservableObject, Identifiable {
             do {
                 if sessionID.isEmpty {
                     // A fresh conversation goes to the harness chosen in Settings right now.
-                    harness = Defaults[.systemTwoHarness]
+                    harness = computerUse ? .codex : Defaults[.systemTwoHarness]
                     if !modeChosen || !harness.modes.contains(mode) { mode = harness.defaultMode }
                     isBusy = true
-                    sessionID = try await backend.createSession()
+                    if computerUse, let codex = backend as? CodexBackend {
+                        sessionID = try await codex.createSession(model: model)
+                        ComputerTool.shared.grantConversation(sessionID)
+                    } else {
+                        sessionID = try await backend.createSession()
+                    }
                     manager.register(self)
                 }
+                try Task.checkCancellation()
                 isBusy = true
                 // "Summarize this", "move these": give the agent what the user is looking at,
                 // sent so the chat shows only what was said.
@@ -366,15 +385,19 @@ final class AgentThread: ObservableObject, Identifiable {
                 }
                 planReadyItemID = nil
                 try await backend.send(trimmed, context: context, mode: mode, to: sessionID)
+            } catch is CancellationError {
+                isBusy = false
             } catch {
                 isBusy = false
                 appendError("Couldn't reach \(harness.name): \(error.localizedDescription)")
                 if showResult { showResultWhenDone = false; manager.announceResult(of: self, dwell: 6) }
             }
         }
+        if computerUse { computerUseRequest = request }
     }
 
     func abort() {
+        computerUseRequest?.cancel()
         guard !sessionID.isEmpty else { return }
         backend.abort(sessionID)
     }
@@ -452,9 +475,11 @@ final class AgentThread: ObservableObject, Identifiable {
         taskStartedAt = nil
         retry = nil
         modelStatus = nil
-        Task { await checkDone() }
-        if DecisionEngine.shared.decisionsAvailable, Defaults[.jevInstantActions] {
-            learnOffer = LearnedActions.shared.candidate(from: items)
+        if !computerUse {
+            Task { await checkDone() }
+            if Defaults[.jevInstantActions], DecisionEngine.shared.decisionsAvailable {
+                learnOffer = LearnedActions.shared.candidate(from: items)
+            }
         }
         if let last = items.last, last.kind == .assistant {
             SpaceMarkEvents.fire(.success)
@@ -634,6 +659,10 @@ final class AgentManager: ObservableObject {
         }
         AgentBackendSink.changed = { [weak self] harness in self?.backendChanged(harness) }
         observeCurrent()
+        ComputerTool.shared.onStop = { [weak self] session in
+            self?.threads[session]?.abort()
+            self?.flashResult(icon: "hand.raised.fill", label: "Stopped")
+        }
         harnessObserver = Defaults.observe(.systemTwoHarness, options: []) { [weak self] change in
             Task { @MainActor in self?.harnessSelected(change.newValue) }
         }
@@ -817,6 +846,17 @@ final class AgentManager: ObservableObject {
         }
         current = AgentThread()
         current.send(text, showResult: true)
+    }
+
+    /// A conversation started as computer use (command line, scripts): Codex, with control already approved.
+    @discardableResult
+    func startComputerUse(_ task: String, model: String? = nil, mode: AgentMode? = nil) -> AgentThread {
+        let chosen = model ?? Defaults[.computerUseModel]
+        let thread = AgentThread(computerUse: true, model: chosen.isEmpty ? nil : chosen)
+        if let mode { thread.setMode(mode) }
+        current = thread
+        thread.send(task, showResult: false, useCapturedContext: false)
+        return thread
     }
 
     /// Ambient nudges start their own thread.

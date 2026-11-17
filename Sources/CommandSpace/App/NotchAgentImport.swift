@@ -78,12 +78,12 @@ enum NotchAgentImport {
         }
 
         // Keys. macOS may ask once to let Command Space read Notch Agent's keychain items.
-        if JevKeychain.load() == nil, let jev = readKeychain(service: "io.otron.notch.jev", account: "api-key") {
-            JevKeychain.save(jev)
+        if JevKeychain.credential.status == .missing,
+           let jev = readKeychain(service: "io.otron.notch.jev", account: "api-key"), JevKeychain.save(jev) {
             imported.append("Jev key")
         }
-        if SpotifyKeychain.load() == nil, let token = readKeychain(service: "io.otron.notch.spotify", account: "refresh-token") {
-            SpotifyKeychain.save(token)
+        if SpotifyKeychain.credential.status == .missing,
+           let token = readKeychain(service: "io.otron.notch.spotify", account: "refresh-token"), SpotifyKeychain.save(token) {
             imported.append("Spotify")
         }
 
@@ -101,15 +101,6 @@ enum NotchAgentImport {
     }
 
     private static func readKeychain(service: String, account: String) -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+        KeychainCredential(service: service, account: account).read(allowingInteraction: true).value
     }
 }

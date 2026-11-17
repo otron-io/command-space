@@ -57,6 +57,12 @@ struct CommandSpaceMain {
             NSApplication.shared.setActivationPolicy(.prohibited)
             NSApplication.shared.run()
         }
+        if let flag = args.firstIndex(of: "--computer-actions"), args.count > flag + 1 {
+            MainActor.assumeIsolated { ComputerUseCLI.runActions(arguments: args) }
+        }
+        if args.contains("--computer-use") {
+            MainActor.assumeIsolated { ComputerUseCLI.run(arguments: args) }
+        }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -79,6 +85,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         AppDelegate.shared = self
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        ControlServer.shared.stop()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Sparkle only makes sense in a signed bundle with a feed (not `swift run`).
         if Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil {
@@ -96,6 +106,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = MusicManager.shared
         _ = CalendarManager.shared
         _ = AgentManager.shared
+        // Lets `CommandSpace --computer-use "task"` hand its task to this instance; false means another instance owns the socket.
+        ControlServer.shared.start { request, connection in ComputerUseCLI.serve(request, on: connection) }
         // Watching ~/Downloads asks for folder access, so it waits until onboarding has explained why.
         if Defaults[.finishedOnboarding] { AmbientMonitor.shared.start() }
         DecisionEngine.shared.warmUpLaya()

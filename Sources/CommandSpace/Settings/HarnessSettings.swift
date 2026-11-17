@@ -234,3 +234,63 @@ struct HarnessModeSection: View {
         .onChange(of: harness) { selection = harness.defaultMode }
     }
 }
+
+/// Computer use: Space looks at the screen and drives the mouse and keyboard (Codex only for now).
+struct ComputerUseSection: View {
+    @ObservedObject private var manager = AgentManager.shared
+    @Default(.computerUseEnabled) private var enabled
+    @Default(.computerUseModel) private var model
+    @State private var granted = Self.grants()
+    // Re-checked every second, also while another app (System Settings) is in front, so a
+    // permission granted there shows up straight away. TimelineView pauses in the background.
+    private let recheck = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+
+    private static func grants() -> [ComputerAccess.Requirement: Bool] {
+        Dictionary(uniqueKeysWithValues: ComputerAccess.Requirement.allCases.map { ($0, ComputerAccess.isGranted($0)) })
+    }
+
+    var body: some View {
+        Section {
+            Toggle("Let Space use the computer", isOn: $enabled)
+            if enabled {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(ComputerAccess.Requirement.allCases) { requirement in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(requirement.title)
+                                Text(requirement.reason)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            if granted[requirement] == true {
+                                Text("Granted").foregroundStyle(.green)
+                            } else {
+                                Button("Grant…") { ComputerAccess.request(requirement) }
+                            }
+                        }
+                    }
+                }
+                .onReceive(recheck) { _ in
+                    let now = Self.grants()
+                    if now != granted { granted = now }
+                }
+                Picker("Model for command-line runs", selection: $model) {
+                    Text("Codex default").tag("")
+                    ForEach(manager.codexModels, id: \.id) { option in
+                        Text(option.name).tag(option.id)
+                    }
+                    if !model.isEmpty, !manager.codexModels.contains(where: { $0.id == model }) {
+                        Text(model).tag(model)
+                    }
+                }
+            }
+        } header: {
+            Text("Computer use")
+        } footer: {
+            Text("Space can look at the screen and use the mouse and keyboard when a task needs an app’s own interface. It asks before taking control — once per task, or once per conversation — and esc stops it. New Codex conversations pick this up. From Terminal: CommandSpace --computer-use \"…\".")
+                .foregroundStyle(.secondary)
+                .font(.caption)
+        }
+    }
+}

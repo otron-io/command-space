@@ -13,7 +13,6 @@ import Defaults
 import Foundation
 import Network
 import OSLog
-import Security
 
 private let log = Logger(subsystem: "io.otron.commandspace", category: "spotify")
 
@@ -168,9 +167,13 @@ final class SpotifyClient: ObservableObject {
             lastError = "Spotify token request failed."
             return false
         }
+        if let refresh = json["refresh_token"] as? String,
+           !SpotifyKeychain.save(refresh, allowingInteraction: form["grant_type"] == "authorization_code") {
+            lastError = "Couldn't save the Spotify connection in Keychain. Reconnect in Settings."
+            return false
+        }
         accessToken = token
         accessExpiry = Date().addingTimeInterval((json["expires_in"] as? Double ?? 3600) - 60)
-        if let refresh = json["refresh_token"] as? String { SpotifyKeychain.save(refresh) }
         return true
     }
 
@@ -304,29 +307,15 @@ private extension Data {
     }
 }
 
+@MainActor
 enum SpotifyKeychain {
-    private static let service = "io.otron.commandspace.spotify"
-    private static let account = "refresh-token"
+    static let credential = KeychainCredential(service: "io.otron.commandspace.spotify", account: "refresh-token")
 
-    static func load() -> String? {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-                                    kSecAttrAccount as String: account, kSecReturnData as String: true,
-                                    kSecMatchLimit as String: kSecMatchLimitOne]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess, let data = item as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
+    static func load() -> String? { credential.read().value }
+
+    static func save(_ token: String, allowingInteraction: Bool = true) -> Bool {
+        credential.save(token, allowingInteraction: allowingInteraction)
     }
 
-    static func save(_ token: String) {
-        delete()
-        let attributes: [String: Any] = [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-                                         kSecAttrAccount as String: account, kSecValueData as String: Data(token.utf8),
-                                         kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock]
-        SecItemAdd(attributes as CFDictionary, nil)
-    }
-
-    static func delete() {
-        SecItemDelete([kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-                       kSecAttrAccount as String: account] as CFDictionary)
-    }
+    static func delete() { _ = credential.delete() }
 }

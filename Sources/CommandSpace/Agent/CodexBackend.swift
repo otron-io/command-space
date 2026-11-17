@@ -29,10 +29,20 @@ final class CodexBackend: AgentBackend {
     private var restartDelay: Double = 1
     /// Threads loaded in this app-server (others need `thread/resume` first).
     private var loaded: Set<String> = []
-    private var activeTurn: [String: String] = [:]
+    private final class Turn {
+        var id: String?
+        var interrupted = false
+    }
+    private var activeTurn: [String: Turn] = [:]
     /// Approval id -> the JSON-RPC request id to answer, and what kind of approval it is.
     private var approvals: [String: (rpcID: Any, method: String)] = [:]
     private var commandNames: [String: String] = [:]
+    /// Each session's current mode, for the computer tool's plan/full-access rules.
+    private var modes: [String: AgentMode] = [:]
+    /// Models chosen when a session was created (computer-use conversations), overriding the Settings model.
+    private var sessionModels: [String: String] = [:]
+    /// An older Codex rejected `dynamicTools`: don't offer the computer tool again this run.
+    private var dynamicToolsUnsupported = false
 
     private func notify(_ changed: Bool) { if changed { AgentBackendSink.changed(harness) } }
 
@@ -68,7 +78,8 @@ final class CodexBackend: AgentBackend {
             self.process = process
             do {
                 _ = try await call("initialize", ["clientInfo": ["name": "command-space", "title": "Command Space",
-                                                                 "version": Self.appVersion]])
+                                                                 "version": Self.appVersion],
+                                                     "capabilities": ["experimentalApi": true]])
                 process.send(["method": "initialized"])
                 try await checkAccount()
                 restartDelay = 1
@@ -88,6 +99,7 @@ final class CodexBackend: AgentBackend {
         process?.terminate()
         failPending()
         loaded = []
+        for session in activeTurn.keys { ComputerTool.shared.turnEnded(session) }
         activeTurn = [:]
         connection = .connecting
     }
@@ -102,9 +114,13 @@ final class CodexBackend: AgentBackend {
             AgentBackendSink.event(harness, permission.sessionID, .permissionResolved(permission.id))
         }
         openPermissions = [:]
-        for session in activeTurn.keys { AgentBackendSink.event(harness, session, .busy(false)) }
-        activeTurn = [:]
         let tail = stderr.split(separator: "\n").last.map(String.init) ?? "exit \(status)"
+        for session in activeTurn.keys {
+            ComputerTool.shared.turnEnded(session)
+            AgentBackendSink.event(harness, session, .error("Codex stopped (\(tail))"))
+            AgentBackendSink.event(harness, session, .busy(false))
+        }
+        activeTurn = [:]
         connection = .offline("Codex stopped (\(tail)). Restarting…")
         let delay = restartDelay
         restartDelay = min(restartDelay * 2, 30)
@@ -139,22 +155,45 @@ final class CodexBackend: AgentBackend {
             "cwd": SpaceWorkspace.url.path,
             "approvalPolicy": "untrusted",
             "sandbox": "danger-full-access",
-            "developerInstructions": SpaceWorkspace.instructions,
+            "developerInstructions": SpaceWorkspace.instructions
+                + (Defaults[.computerUseEnabled] ? "\n\n" + ComputerActions.instructions : ""),
         ]
         let model = Defaults[.codexModel]
         if !model.isEmpty { settings["model"] = model }
         return settings
     }
 
-    func createSession() async throws -> String {
+    func createSession() async throws -> String { try await createSession(model: nil) }
+
+    /// `model` overrides the Settings model for this conversation (computer use from the command line).
+    func createSession(model: String?) async throws -> String {
         try await ready()
         var params = threadSettings
         params["serviceName"] = "Command Space"
-        let result = try await call("thread/start", params) as? [String: Any]
+        if let model, !model.isEmpty { params["model"] = model }
+        let withTools = Defaults[.computerUseEnabled] && !dynamicToolsUnsupported
+        let result: [String: Any]?
+        if withTools {
+            var attempt = params
+            attempt["dynamicTools"] = [ComputerActions.codexToolSpec]
+            do {
+                result = try await call("thread/start", attempt) as? [String: Any]
+            } catch {
+                // Only a Codex that doesn't know the field loses the tool for good; anything else may be passing.
+                let reason = error.localizedDescription.lowercased()
+                if ["dynamic", "experimental", "unknown field"].contains(where: reason.contains) {
+                    dynamicToolsUnsupported = true
+                }
+                result = try await call("thread/start", params) as? [String: Any]
+            }
+        } else {
+            result = try await call("thread/start", params) as? [String: Any]
+        }
         guard let thread = result?["thread"] as? [String: Any], let id = thread["id"] as? String else {
             throw CodexError(message: "Codex didn’t start a conversation")
         }
         loaded.insert(id)
+        if let model, !model.isEmpty { sessionModels[id] = model }
         return id
     }
 
@@ -168,10 +207,28 @@ final class CodexBackend: AgentBackend {
         }
     }
 
-    func setMode(_ mode: AgentMode, for session: String) {}
+    func setMode(_ mode: AgentMode, for session: String) { modes[session] = mode }
 
     func send(_ text: String, context: AgentRequestContext?, mode: AgentMode, to session: String) async throws {
+        guard activeTurn[session] == nil else { throw CodexError(message: "A turn is already running") }
+        let turn = Turn()
+        activeTurn[session] = turn
+        do {
+            try await startTurn(text, context: context, mode: mode, session: session, turn: turn)
+        } catch {
+            if activeTurn[session] === turn {
+                activeTurn[session] = nil
+                ComputerTool.shared.turnEnded(session)
+                AgentBackendSink.event(harness, session, .busy(false))
+            }
+            throw error
+        }
+    }
+
+    private func startTurn(_ text: String, context: AgentRequestContext?, mode: AgentMode, session: String, turn: Turn) async throws {
         try await ready()
+        guard !turn.interrupted, activeTurn[session] === turn else { throw CancellationError() }
+        modes[session] = mode
         if !loaded.contains(session) {
             var params = threadSettings
             params["threadId"] = session
@@ -179,27 +236,43 @@ final class CodexBackend: AgentBackend {
             _ = try await call("thread/resume", params)
             loaded.insert(session)
         }
+        guard !turn.interrupted, activeTurn[session] === turn else { throw CancellationError() }
         let policy = Self.policy(for: mode)
         var params: [String: Any] = ["threadId": session, "input": AgentInput.codex(text, context: context, planning: mode == .plan),
                                      "approvalPolicy": policy.approval, "sandboxPolicy": policy.sandbox]
-        let model = Defaults[.codexModel]
+        let model = sessionModels[session] ?? Defaults[.codexModel]
         if !model.isEmpty { params["model"] = model }
         AgentBackendSink.event(harness, session, .busy(true))
-        do {
-            let result = try await call("turn/start", params) as? [String: Any]
-            if let turn = (result?["turn"] as? [String: Any])?["id"] as? String { activeTurn[session] = turn }
-        } catch {
-            AgentBackendSink.event(harness, session, .busy(false))
-            throw error
+        let result = try await call("turn/start", params) as? [String: Any]
+        guard let id = (result?["turn"] as? [String: Any])?["id"] as? String else {
+            throw CodexError(message: "Codex didn’t return a turn ID")
         }
+        if activeTurn[session] === turn { recordTurnID(id, session: session, turn: turn) }
     }
 
     func abort(_ session: String) {
-        guard let turn = activeTurn[session] else { return }
-        Task { _ = try? await call("turn/interrupt", ["threadId": session, "turnId": turn]) }
+        guard let turn = activeTurn[session], !turn.interrupted else { return }
+        turn.interrupted = true
+        ComputerTool.shared.stopTurn(session)
+        if let id = turn.id { interrupt(id, session: session, turn: turn) }
+    }
+
+    /// A stop can arrive before Codex sends the ID needed for turn/interrupt.
+    private func recordTurnID(_ id: String, session: String, turn: Turn) {
+        guard turn.id == nil else { return }
+        turn.id = id
+        if turn.interrupted { interrupt(id, session: session, turn: turn) }
+    }
+
+    private func interrupt(_ id: String, session: String, turn: Turn) {
+        Task {
+            guard activeTurn[session] === turn else { return }
+            _ = try? await call("turn/interrupt", ["threadId": session, "turnId": id])
+        }
     }
 
     func reply(to permission: AgentPermission, with reply: PermissionReply) {
+        if ComputerTool.shared.resolve(permission, with: reply) { return }
         guard let approval = approvals.removeValue(forKey: permission.id) else { return }
         let decision: String
         switch reply {
@@ -253,6 +326,7 @@ final class CodexBackend: AgentBackend {
         }
         let busy = ((thread["status"] as? [String: Any])?["type"] as? String) == "active"
         let pendingHere = openPermissions.values.filter { $0.sessionID == session }
+            + ComputerTool.shared.pendingPermissions(for: session)
         return AgentSnapshot(items: items, permissions: pendingHere, busy: busy, title: thread["name"] as? String)
     }
 
@@ -355,6 +429,27 @@ final class CodexBackend: AgentBackend {
             permissionRequests[approvalID] = params["permissions"] as? [String: Any] ?? [:]
             emitPermission(approvalID, session: session, kind: "permissions",
                            pattern: (params["reason"] as? String) ?? "Extra access", callID: callID)
+        case "item/tool/call":
+            let arguments = params["arguments"]
+            guard params["tool"] as? String == ComputerActions.toolName else {
+                respond(id, ["contentItems": [["type": "inputText", "text": "Unknown tool"]], "success": false])
+                return
+            }
+            guard let servingProcess = process else { return }
+            Task {
+                guard process === servingProcess else { return }
+                guard let turn = activeTurn[session], !turn.interrupted,
+                      let turnID = params["turnId"] as? String, turn.id == turnID else {
+                    respond(id, ["contentItems": [["type": "inputText", "text": "This turn is no longer active."]], "success": false])
+                    return
+                }
+                let mode = modes[session] ?? .ask
+                let result = await ComputerTool.shared.call(arguments: arguments, session: session, harness: harness, mode: mode)
+                guard process === servingProcess else { return }
+                var items: [[String: Any]] = [["type": "inputText", "text": result.text]]
+                if let image = result.image { items.append(["type": "inputImage", "imageUrl": image.dataURL]) }
+                respond(id, ["contentItems": items, "success": result.success])
+            }
         case "mcpServer/elicitation/request":
             process?.send(["id": id, "result": ["action": "decline"]])
         case "item/tool/requestUserInput":
@@ -381,12 +476,18 @@ final class CodexBackend: AgentBackend {
         let send = { (event: AgentEvent) in AgentBackendSink.event(self.harness, session, event) }
         switch method {
         case "turn/started":
-            if let turn = (params["turn"] as? [String: Any])?["id"] as? String { activeTurn[session] = turn }
+            guard let turn = activeTurn[session], let id = (params["turn"] as? [String: Any])?["id"] as? String,
+                  turn.id == nil || turn.id == id else { return }
+            recordTurnID(id, session: session, turn: turn)
             send(.busy(true))
         case "turn/completed":
-            activeTurn[session] = nil
             let turn = params["turn"] as? [String: Any]
-            if turn?["status"] as? String == "failed",
+            guard let active = activeTurn[session], active.id == nil || active.id == turn?["id"] as? String else { return }
+            activeTurn[session] = nil
+            ComputerTool.shared.turnEnded(session)
+            if active.interrupted || turn?["status"] as? String == "interrupted" {
+                send(.error("Stopped"))
+            } else if turn?["status"] as? String == "failed",
                let message = (turn?["error"] as? [String: Any])?["message"] as? String {
                 send(.error(message))
             }
@@ -394,7 +495,8 @@ final class CodexBackend: AgentBackend {
             send(.busy(false))
         case "item/started", "item/completed":
             guard let raw = params["item"] as? [String: Any] else { return }
-            if raw["type"] as? String == "agentMessage" || raw["type"] as? String == "commandExecution" {
+            if raw["type"] as? String == "agentMessage" || raw["type"] as? String == "commandExecution"
+                || raw["type"] as? String == "dynamicToolCall" {
                 if method == "item/started" { send(.step) }
             }
             if let item = makeItem(raw, includeUser: false) {
@@ -469,6 +571,11 @@ final class CodexBackend: AgentBackend {
             var status = Self.status(raw["status"] as? String)
             if raw["error"] as? [String: Any] != nil { status = "error" }
             return AgentItem(id: id, kind: .tool(name: name, status: status), text: "", callID: id)
+        case "dynamicToolCall":
+            var status = Self.status(raw["status"] as? String)
+            if raw["success"] as? Bool == false { status = "error" }
+            return AgentItem(id: id, kind: .tool(name: raw["tool"] as? String ?? "tool", status: status),
+                             text: ComputerActions.summary(of: raw["arguments"]), callID: id)
         case "webSearch":
             return AgentItem(id: id, kind: .tool(name: "websearch", status: "completed"),
                              text: raw["query"] as? String ?? "", callID: id)

@@ -10,7 +10,6 @@
 import Defaults
 import Foundation
 import OSLog
-import Security
 
 private let log = Logger(subsystem: "io.otron.commandspace", category: "decisions")
 
@@ -90,11 +89,11 @@ final class DecisionEngine: ObservableObject {
     private let jevURL = URL(string: "https://api.typesafe.ai/v1/systemone")!
 
     var hasJevKey: Bool { JevKeychain.load() != nil }
-    var jevAvailable: Bool { hasJevKey && Date() >= jevBackoffUntil }
+    private var readyJevKey: String? { Date() >= jevBackoffUntil ? JevKeychain.load() : nil }
 
     /// Whether `decide` can answer at all: Jev, or the local model when Local is chosen.
     var decisionsAvailable: Bool {
-        jevAvailable || (Defaults[.decisionBackend] == .local && LayaModelStore.shared.modelDirectory != nil)
+        (Defaults[.decisionBackend] == .local && onDeviceAvailable) || readyJevKey != nil
     }
 
     /// - Parameters:
@@ -112,19 +111,24 @@ final class DecisionEngine: ObservableObject {
     ) async -> DecisionResult? {
         switch Defaults[.decisionBackend] {
         case .jev:
-            if jevAvailable, let result = await askJev(state: state, questions: questions, timeout: timeout) {
+            if let key = readyJevKey, let result = await askJev(key: key, state: state, questions: questions, timeout: timeout) {
                 return result
             }
         case .local:
             if let result = await askLaya(state: state, questions: questions) {
                 return result
             }
-            if jevAvailable, let result = await askJev(state: state, questions: questions, timeout: timeout) {
+            if let key = readyJevKey, let result = await askJev(key: key, state: state, questions: questions, timeout: timeout) {
                 return result
             }
         case .shadow:
             async let laya = askLaya(state: state, questions: questions)
-            let jev = jevAvailable ? await askJev(state: state, questions: questions, timeout: timeout) : nil
+            let jev: DecisionResult?
+            if let key = readyJevKey {
+                jev = await askJev(key: key, state: state, questions: questions, timeout: timeout)
+            } else {
+                jev = nil
+            }
             let local = await laya
             if jev != nil || local != nil {
                 LayaShadowLog.record(state: state, questions: questions, jev: jev, laya: local)
@@ -140,10 +144,24 @@ final class DecisionEngine: ObservableObject {
     }
 
     /// Used by Settings to verify the key.
-    func testJev() async -> String {
-        guard hasJevKey else { return "No API key saved." }
+    func testJev(usingSavedValue savedValue: String? = nil) async -> String {
+        let key: String
+        if let savedValue {
+            key = savedValue
+        } else {
+            let saved = JevKeychain.credential.read(allowingInteraction: true)
+            guard let value = saved.value else {
+                switch saved.status {
+                case .missing: return "No API key saved."
+                case .needsAccess: return "Keychain access is needed to use the saved Jev key."
+                default: return "Couldn't read the saved Jev key from Keychain."
+                }
+            }
+            key = value
+        }
         jevBackoffUntil = .distantPast
         let result = await askJev(
+            key: key,
             state: ["message": "Can you turn the volume down a bit?"],
             questions: [("about_audio", .noul("The message is about sound or volume"))],
             timeout: 5
@@ -214,8 +232,7 @@ final class DecisionEngine: ObservableObject {
 
     // MARK: - Jev
 
-    private func askJev(state: Any, questions: [(String, DecisionQuestion)], timeout: TimeInterval) async -> DecisionResult? {
-        guard let key = JevKeychain.load() else { return nil }
+    private func askJev(key: String, state: Any, questions: [(String, DecisionQuestion)], timeout: TimeInterval) async -> DecisionResult? {
         var qs: [String: Any] = [:]
         for (id, question) in questions {
             switch question {
@@ -434,46 +451,17 @@ enum LayaShadowLog {
 
 // MARK: - Keychain
 
+@MainActor
 enum JevKeychain {
-    private static let service = "io.otron.commandspace.jev"
-    private static let account = "api-key"
+    static let credential = KeychainCredential(service: "io.otron.commandspace.jev", account: "api-key")
 
-    static func load() -> String? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
-              let key = String(data: data, encoding: .utf8), !key.isEmpty else { return nil }
-        return key
-    }
+    static func load() -> String? { credential.read().value }
 
     @discardableResult
     static func save(_ key: String) -> Bool {
-        delete()
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return true }
-        let attributes: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: Data(trimmed.utf8),
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlock,
-        ]
-        return SecItemAdd(attributes as CFDictionary, nil) == errSecSuccess
+        return !trimmed.isEmpty && credential.save(trimmed)
     }
 
-    static func delete() {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-        ]
-        SecItemDelete(query as CFDictionary)
-    }
+    static func delete() -> Bool { credential.delete() }
 }

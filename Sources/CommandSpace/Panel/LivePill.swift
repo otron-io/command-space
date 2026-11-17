@@ -50,6 +50,11 @@ final class LivePillController {
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { _ in
             Task { @MainActor in LivePillController.shared.position() }
         }
+        // The agent's clicks must reach what's under the pill, which the screenshots leave out.
+        ComputerTool.shared.$controlling
+            .receive(on: RunLoop.main)
+            .sink { [weak self] session in self?.panel.ignoresMouseEvents = session != nil }
+            .store(in: &cancellables)
         position()
     }
 
@@ -92,6 +97,7 @@ struct LivePillView: View {
     @ObservedObject private var voice = VoiceInput.shared
     @ObservedObject private var timers = AgentTimers.shared
     @ObservedObject private var monitor = AmbientMonitor.shared
+    @ObservedObject private var computer = ComputerTool.shared
 
     var body: some View {
         VStack(spacing: 8) {
@@ -137,6 +143,10 @@ struct LivePillView: View {
         }
         if !agent.permissions.isEmpty {
             return Content(mood: .attention, icon: "hand.raised.fill", tint: .yellow, text: "Space needs your approval", glow: .yellow.opacity(0.35))
+        }
+        if agent.isBusy, computer.controlling != nil {
+            return Content(mood: .working, icon: "cursorarrow.rays", tint: .yellow, text: "Using your Mac · esc to stop",
+                           trailing: agent.taskStartedAt.map { AgentActivityView.clock(Date().timeIntervalSince($0)) })
         }
         if agent.isBusy {
             var text = "Working"

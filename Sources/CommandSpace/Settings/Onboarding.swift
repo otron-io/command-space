@@ -201,29 +201,41 @@ struct Onboarding: View {
 /// Compact Jev key field used in onboarding (Settings has the full section).
 struct JevKeyEntry: View {
     @State private var key = ""
+    @State private var keyStatus = KeychainCredential.Status.missing
     @State private var result: String?
     @State private var testing = false
+
+    private var hasSavedKey: Bool { keyStatus == .available || keyStatus == .needsAccess }
+    private var newKey: String { key.trimmingCharacters(in: .whitespacesAndNewlines) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                SecureField(DecisionEngine.shared.hasJevKey ? "Key saved · paste to replace" : "Jev API key", text: $key)
+                SecureField(hasSavedKey ? "Key saved · paste to replace" : "Jev API key", text: $key)
                     .textFieldStyle(.roundedBorder)
-                Button(testing ? "Testing…" : "Save & test") {
+                Button(testing ? "Testing…" : newKey.isEmpty && hasSavedKey ? "Test saved key" : "Save & test") {
+                    let newKey = self.newKey
+                    if !newKey.isEmpty {
+                        guard JevKeychain.save(newKey) else {
+                            result = "Couldn't save to Keychain."
+                            return
+                        }
+                        key = ""
+                    }
                     testing = true
-                    if !key.isEmpty { JevKeychain.save(key) }
-                    key = ""
                     Task {
-                        result = await DecisionEngine.shared.testJev()
+                        result = await DecisionEngine.shared.testJev(usingSavedValue: newKey.isEmpty ? nil : newKey)
+                        keyStatus = JevKeychain.credential.status
                         testing = false
                     }
                 }
-                .disabled(testing || (key.isEmpty && !DecisionEngine.shared.hasJevKey))
+                .disabled(testing || (newKey.isEmpty && !hasSavedKey))
             }
             if let result {
                 Text(result).font(.caption).foregroundStyle(result.hasPrefix("OK") ? .green : .orange)
             }
         }
+        .onAppear { keyStatus = JevKeychain.credential.status }
     }
 }
 
