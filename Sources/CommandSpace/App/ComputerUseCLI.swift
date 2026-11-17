@@ -126,11 +126,18 @@ enum ComputerUseCLI {
         }
         let model = value(of: "--model", in: args)
         let json = args.contains("--json")
-        let timeout = value(of: "--timeout", in: args).flatMap(Double.init) ?? 900
+        var timeout: Double = 900
+        if args.contains("--timeout") {
+            guard let raw = value(of: "--timeout", in: args), let parsed = Double(raw),
+                  parsed.isFinite, parsed > 0, parsed <= Double(Int64.max) / 1_000_000_000 else {
+                fail(usage: "--timeout needs a finite positive number of seconds")
+            }
+            timeout = parsed
+        }
 
         headlessApp()
         if !args.contains("--standalone"), ControlClient.isServerRunning() {
-            forward(task: task, model: model, mode: mode, json: json)
+            forward(task: task, model: model, mode: mode, json: json, timeout: timeout)
         } else {
             let run = StandaloneRun(task: task, model: model, mode: mode, json: json, timeout: timeout)
             standalone = run
@@ -143,7 +150,7 @@ enum ComputerUseCLI {
     private static var standalone: StandaloneRun?
 
     /// Hands the task to the running app and prints what it streams back.
-    private static func forward(task: String, model: String?, mode: AgentMode?, json: Bool) {
+    private static func forward(task: String, model: String?, mode: AgentMode?, json: Bool, timeout: Double) {
         var request: [String: Any] = ["command": "computer-use", "task": task]
         if let model { request["model"] = model }
         if let mode { request["mode"] = mode.rawValue }
@@ -152,18 +159,28 @@ enum ComputerUseCLI {
             exit(130)
         }
         Task {
-            var ok: Bool?
+            try? await Task.sleep(for: .seconds(timeout))
+            ControlClient.disconnect()
+            print(["type": "error", "text": "Timed out"], json: json)
+            print(["type": "done", "ok": false], json: json)
+            exit(124)
+        }
+        Task {
             do {
                 try await ControlClient.run(request) { message in
                     print(message, json: json)
-                    if message["type"] as? String == "done" { ok = message["ok"] as? Bool ?? false }
+                    if message["type"] as? String == "done" {
+                        exit((message["ok"] as? Bool ?? false) ? 0 : 1)
+                    }
                 }
             } catch {
                 print(["type": "error", "text": "Command Space isn't accepting connections"], json: json)
                 print(["type": "done", "ok": false], json: json)
                 exit(1)
             }
-            exit(ok == true ? 0 : 1)
+            print(["type": "error", "text": "Command Space disconnected before the task finished"], json: json)
+            print(["type": "done", "ok": false], json: json)
+            exit(1)
         }
     }
 
@@ -209,6 +226,8 @@ enum ComputerUseCLI {
         private let backend = CodexBackend()
         private var session = ""
         private var sawBusy = false
+        private var sendCompleted = false
+        private var idleAfterBusy = false
         private var failed = false
         /// The user pressed esc: report it as a stop (exit 130, like ⌃C), not as a failure.
         private var stoppedByUser = false
@@ -235,13 +254,26 @@ enum ComputerUseCLI {
             AgentBackendSink.event = { [weak self] _, _, event in
                 MainActor.assumeIsolated { self?.handle(event) }
             }
+            ComputerUseCLI.onInterrupt { [self] in
+                stoppedByUser = true
+                backend.abort(session)
+                finish(code: 130)
+            }
+            Task { [timeout] in
+                try? await Task.sleep(for: .seconds(timeout))
+                guard !finished else { return }
+                backend.abort(session)
+                finish(error: "Timed out", code: 124)
+            }
             backend.start()
             let chosen = model ?? Defaults[.computerUseModel]
             do {
                 session = try await backend.createSession(model: chosen.isEmpty ? nil : chosen)
             } catch {
                 finish(error: error.localizedDescription, code: 1)
+                return
             }
+            guard !finished else { return }
             emit(["type": "status", "text": "Started · \(chosen.isEmpty ? "Codex default model" : chosen)"])
             // Running this command is the user's approval for control.
             ComputerTool.shared.grantConversation(session)
@@ -252,33 +284,27 @@ enum ComputerUseCLI {
             }
             emit(["type": "status", "text": "esc stops it"])
 
-            ComputerUseCLI.onInterrupt { [self] in
-                backend.abort(session)
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(130) }
-            }
-            Task { [timeout] in
-                try? await Task.sleep(for: .seconds(timeout))
-                guard !finished else { return }
-                backend.abort(session)
-                finish(error: "Timed out", code: 124)
-            }
             do {
                 try await backend.send(task, context: nil, mode: mode, to: session)
+                sendCompleted = true
+                if idleAfterBusy { finish() }
             } catch {
-                finish(error: error.localizedDescription, code: 1)
+                if stoppedByUser { finish(code: 130) }
+                else { finish(error: error.localizedDescription, code: 1) }
             }
         }
 
-        private func finish(error: String? = nil, code: Int32? = nil) -> Never {
-            if !finished {
-                finished = true
+        private func finish(error: String? = nil, code: Int32? = nil) {
+            guard !finished else { return }
+            finished = true
+            let status = code ?? (stoppedByUser ? 130 : failed ? 1 : 0)
+            backend.stop()
+            Task {
+                await ComputerTool.shared.waitForBatchToFinish()
                 if let error { emit(["type": "error", "text": error]) }
-                let status = code ?? (stoppedByUser ? 130 : failed ? 1 : 0)
                 emit(["type": "done", "ok": status == 0])
-                backend.stop()
                 exit(status)
             }
-            exit(code ?? 1)
         }
 
         private func handle(_ event: AgentEvent) {
@@ -306,7 +332,13 @@ enum ComputerUseCLI {
             case .permission(let permission):
                 ask(permission)
             case .busy(let busy):
-                if busy { sawBusy = true } else if sawBusy { finish() }
+                if busy {
+                    sawBusy = true
+                    idleAfterBusy = false
+                } else if sawBusy {
+                    idleAfterBusy = true
+                    if sendCompleted { finish() }
+                }
             default: break
             }
         }

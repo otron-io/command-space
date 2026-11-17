@@ -50,6 +50,7 @@ final class ComputerTool: ObservableObject {
     private var taskGrants = Set<String>()
     private var cards: [String: Card] = [:]  // by session
     private var flags: [String: StopFlag] = [:]
+    private var runningBatch = false
     private var monitors: [Any] = []
     private init() {}
 
@@ -71,12 +72,18 @@ final class ComputerTool: ObservableObject {
             return fail("Plan mode: you may only look (screenshot, wait). Describe what you would do instead.")
         }
 
+        let flag = flags[session] ?? StopFlag()
+        flags[session] = flag
+        func shouldStop() -> Bool { flag.stopped || Task.isCancelled }
+        func stopped() -> ComputerResult { fail("Computer control was stopped. Do not continue the task.") }
+        if shouldStop() { return stopped() }
         let granted = mode == .fullAccess || conversationGrants.contains(session) || taskGrants.contains(session)
         if headless {
             if !granted { return fail("The user has not allowed computer control for this conversation.") }
             if let missing = missingAccess() { return fail(missing) }
         } else if !granted || missingAccess() != nil {
             let reply = await askApproval(arguments: arguments, session: session, harness: harness)
+            if shouldStop() { return stopped() }
             switch reply {
             case .reject:
                 return fail("The user declined to let you see or control the computer. Respect that: don't try again, and don't look at or control the screen or apps any other way either (no screencapture, AppleScript, osascript or System Events). Tell the user you didn't, and ask what they would like instead.")
@@ -86,16 +93,20 @@ final class ComputerTool: ObservableObject {
             if let missing = missingAccess() { return fail(missing) }
         }
 
-        let flag = StopFlag()
-        flags[session] = flag
-        controlling = session
-        startEscMonitor()
-        if !headless { await leaveCommandSpace() }
-        if flag.stopped {
-            return fail("The user stopped computer control (esc). Stop now; do not continue the task.")
+        guard !runningBatch else {
+            return fail("Another computer action batch is still running. Wait for it to finish before using the computer again.")
         }
+        runningBatch = true
+        controlling = session
+        defer {
+            runningBatch = false
+            if shouldStop() { releaseControl(session) }
+        }
+        startEscMonitor()
+        if !headless { await leaveCommandSpace(shouldStop: shouldStop) }
+        if shouldStop() { return stopped() }
         log.notice("computer call: \(ComputerActions.summary(of: arguments), privacy: .private)")
-        return await driver.perform(actions, shouldStop: { flag.stopped })
+        return await driver.perform(actions, shouldStop: shouldStop)
     }
 
     // MARK: Approval
@@ -119,13 +130,33 @@ final class ComputerTool: ObservableObject {
         cards[session].map { [$0.permission] } ?? []
     }
 
-    /// The turn finished or was aborted: forget the per-task approval, cancel a waiting card, release control.
+    /// Abort immediately, including while approval or the driver is suspended.
+    func stopTurn(_ session: String) {
+        flags[session]?.stopped = true
+        finish(card: session, with: .reject)
+        releaseControl(session)
+    }
+
+    /// End the turn and discard its approval after signalling any in-flight batch.
     func turnEnded(_ session: String) {
+        stopTurn(session)
         taskGrants.remove(session)
-        if cards[session] != nil { finish(card: session, with: .reject) }
         flags[session] = nil
-        if controlling == session { controlling = nil }
-        if controlling == nil { stopEscMonitor() }
+    }
+
+    private func releaseControl(_ session: String) {
+        guard !runningBatch, controlling == session else { return }
+        stopEscMonitor()
+        controlling = nil
+    }
+
+    /// Let a standalone process release any held keys/buttons before it exits. A pending
+    /// system call (such as screen capture) must not hold the command open indefinitely.
+    func waitForBatchToFinish() async {
+        for _ in 0..<20 {
+            guard runningBatch else { return }
+            try? await Task.sleep(for: .milliseconds(25))
+        }
     }
 
     private func askApproval(arguments: Any?, session: String, harness: SystemTwoHarness) async -> PermissionReply {
@@ -159,17 +190,17 @@ final class ComputerTool: ObservableObject {
     }
 
     /// Typed into the panel: put the user's app back in front before acting on it.
-    private func leaveCommandSpace() async {
+    private func leaveCommandSpace(shouldStop: () -> Bool) async {
         guard let app = NSApp else { return }
         guard app.isActive || CommandPanelController.shared.isVisible else { return }
         let target = ContextCapture.shared.targetPID.flatMap { NSRunningApplication(processIdentifier: $0) }
         CommandPanelController.shared.hide()
         if let target { target.activate() } else { NSApp.hide(nil) }
         let deadline = Date().addingTimeInterval(1.5)
-        while !Self.frontmostIsOther, Date() < deadline {
+        while !shouldStop(), !Self.frontmostIsOther, Date() < deadline {
             try? await Task.sleep(for: .milliseconds(30))
         }
-        try? await Task.sleep(for: .milliseconds(120))
+        if !shouldStop() { try? await Task.sleep(for: .milliseconds(120)) }
     }
 
     // MARK: Esc to stop
@@ -241,9 +272,9 @@ final class ComputerTool: ObservableObject {
     }
 
     private func userPressedEsc() {
-        guard let session = controlling else { return }
+        guard let session = controlling, flags[session]?.stopped == false else { return }
         log.notice("user pressed esc; stopping computer control")
-        flags[session]?.stopped = true
+        stopTurn(session)
         onStop(session)
     }
 }

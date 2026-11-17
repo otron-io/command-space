@@ -145,9 +145,24 @@ final class ComputerUseTests: XCTestCase {
 @MainActor
 private final class FakeComputer: ComputerDriver {
     private(set) var batches: [[ComputerAction]] = []
+    var pauseNextBatch = false
+    private(set) var stopRequested: (() -> Bool)?
+    private var heldBatch: CheckedContinuation<Void, Never>?
+
     func perform(_ actions: [ComputerAction], shouldStop: @escaping () -> Bool) async -> ComputerResult {
         batches.append(actions)
-        return ComputerResult(success: true, text: "ok", image: nil)
+        if pauseNextBatch {
+            pauseNextBatch = false
+            stopRequested = shouldStop
+            await withCheckedContinuation { heldBatch = $0 }
+            stopRequested = nil
+        }
+        return ComputerResult(success: !shouldStop(), text: shouldStop() ? "stopped" : "ok", image: nil)
+    }
+
+    func releaseBatch() {
+        heldBatch?.resume()
+        heldBatch = nil
     }
 }
 
@@ -369,7 +384,7 @@ final class ComputerToolRulesTests: XCTestCase {
         XCTAssertEqual(cards().count, 1)
     }
 
-    func testTurnEndedDeclinesWaitingCard() async {
+    func testTurnEndedClosesWaitingCard() async {
         let session = newSession()
         let task = await startCall(click, session, .ask)
         XCTAssertFalse(tool.pendingPermissions(for: session).isEmpty)
@@ -377,8 +392,79 @@ final class ComputerToolRulesTests: XCTestCase {
         XCTAssertTrue(tool.pendingPermissions(for: session).isEmpty)
         let result = await task.value
         XCTAssertFalse(result.success)
-        XCTAssertTrue(result.text.contains("declined"))
+        XCTAssertTrue(result.text.contains("stopped"))
         XCTAssertTrue(fake.batches.isEmpty)
+    }
+
+    func testAbortAfterApprovalPreventsDriverFromStarting() async {
+        let session = newSession()
+        let task = await startCall(click, session, .ask)
+        tool.resolve(try! XCTUnwrap(cards().first), with: .once)
+        tool.stopTurn(session)
+        let result = await task.value
+        XCTAssertFalse(result.success)
+        XCTAssertTrue(result.text.contains("stopped"))
+        XCTAssertTrue(fake.batches.isEmpty)
+    }
+
+    func testTurnStopKeepsExclusiveControlUntilDriverExits() async {
+        tool.headless = true
+        let session = newSession()
+        let other = newSession()
+        fake.pauseNextBatch = true
+        let first = Task { await self.call(self.shot, session, .fullAccess) }
+        for _ in 0..<100 where fake.stopRequested == nil {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        guard let stopRequested = fake.stopRequested else {
+            first.cancel()
+            XCTFail("The driver never started")
+            return
+        }
+
+        let sameTurn = await call(shot, session, .fullAccess)
+        let otherTurn = await call(shot, other, .fullAccess)
+        XCTAssertFalse(sameTurn.success)
+        XCTAssertFalse(otherTurn.success)
+        XCTAssertFalse(stopRequested())
+
+        tool.stopTurn(session)
+        XCTAssertTrue(stopRequested())
+        let stoppedTurn = await call(shot, session, .fullAccess)
+        XCTAssertFalse(stoppedTurn.success)
+        tool.turnEnded(session)
+        let whileDraining = await call(shot, other, .fullAccess)
+        XCTAssertFalse(whileDraining.success)
+        XCTAssertEqual(tool.controlling, session)
+        XCTAssertEqual(fake.batches.count, 1)
+
+        fake.releaseBatch()
+        let result = await first.value
+        XCTAssertFalse(result.success)
+        XCTAssertNil(tool.controlling)
+        let next = await call(shot, other, .fullAccess)
+        XCTAssertTrue(next.success)
+    }
+
+    func testEndingTurnDirectlySignalsActiveBatch() async {
+        tool.headless = true
+        let session = newSession()
+        fake.pauseNextBatch = true
+        let first = Task { await self.call(self.shot, session, .fullAccess) }
+        for _ in 0..<100 where fake.stopRequested == nil {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        guard let stopRequested = fake.stopRequested else {
+            first.cancel()
+            XCTFail("The driver never started")
+            return
+        }
+        tool.turnEnded(session)
+        XCTAssertTrue(stopRequested())
+        fake.releaseBatch()
+        let result = await first.value
+        XCTAssertFalse(result.success)
+        XCTAssertNil(tool.controlling)
     }
 
     func testCardDescribesTheRequest() async {

@@ -131,6 +131,7 @@ final class MacComputer: ComputerDriver {
             log.notice("action \(index + 1)/\(actions.count): \(action.summary, privacy: .private)")
             do {
                 try await execute(action, shouldStop: shouldStop)
+                if shouldStop() { return stopped(after: done) }
                 done.append(action.summary)
                 if !action.isReadOnly { changedScreen = true }
             } catch let error as ActionFailure {
@@ -152,10 +153,12 @@ final class MacComputer: ComputerDriver {
         if let failure { lines[0] = done.isEmpty ? "Nothing was done." : lines[0]; lines.append(failure) }
         var image: ScreenImage?
         do {
-            let shot = try await captureScreen()
+            let shot = try await captureScreen(shouldStop: shouldStop)
+            if shouldStop() { return stopped(after: done) }
             image = shot.image
             lines.append("Screenshot: \(Int(shot.size.width))x\(Int(shot.size.height)) px. Coordinates for actions are pixels in this screenshot, origin top-left.")
         } catch {
+            if shouldStop() { return stopped(after: done) }
             log.error("screenshot failed: \(error.localizedDescription, privacy: .public)")
             lines.append("The screenshot failed: \(error.localizedDescription)")
             failure = failure ?? "The screenshot failed."
@@ -170,7 +173,7 @@ final class MacComputer: ComputerDriver {
     }
 
     private func stopped(after done: [String]) -> ComputerResult {
-        var text = "The user stopped computer control (esc). Stop now; do not continue the task."
+        var text = "Computer control was stopped. Do not continue the task."
         if !done.isEmpty { text += "\nDone before stopping: " + done.joined(separator: "; ") }
         return ComputerResult(success: false, text: text, image: nil)
     }
@@ -192,31 +195,33 @@ final class MacComputer: ComputerDriver {
         case .screenshot:
             break  // always captured at the end
         case .click(let x, let y, let button, let count):
-            await click(currentGeometry().point(x: x, y: y), button: button, count: count)
-            await noteFrontApp()
+            await click(currentGeometry().point(x: x, y: y), button: button, count: count, shouldStop: shouldStop)
+            if !shouldStop() { await noteFrontApp() }
         case .move(let x, let y):
             postMouse(.mouseMoved, at: currentGeometry().point(x: x, y: y), button: .left)
         case .drag(let path):
             let geometry = currentGeometry()
-            await drag(path.map { geometry.point(x: $0.x, y: $0.y) })
-            await noteFrontApp()
+            await drag(path.map { geometry.point(x: $0.x, y: $0.y) }, shouldStop: shouldStop)
+            if !shouldStop() { await noteFrontApp() }
         case .scroll(let x, let y, let dx, let dy):
-            await scroll(at: currentGeometry().point(x: x, y: y), dx: dx, dy: dy)
+            await scroll(at: currentGeometry().point(x: x, y: y), dx: dx, dy: dy, shouldStop: shouldStop)
         case .type(let text):
             try checkFrontApp()
             if Self.focusedFieldIsSecure() {
                 throw ActionFailure(message: "The focused field is a password field. Passwords must be typed by the user; ask them to do it.")
             }
-            await type(text)
+            await type(text, shouldStop: shouldStop)
         case .keypress(let keys):
             guard let strokes = ComputerActions.keyStrokes(for: keys) else {
                 throw ActionFailure(message: "Unknown key in [\(keys.joined(separator: ", "))]. Use names like CMD, SHIFT, ENTER, TAB, ESC, UP, F5 or single letters.")
             }
             try checkFrontApp()
             for stroke in strokes {
+                if shouldStop() { return }
                 postKey(stroke.keyCode, down: true, flags: stroke.flags)
                 try? await Task.sleep(for: .milliseconds(50))
                 postKey(stroke.keyCode, down: false, flags: stroke.flags)
+                if shouldStop() { return }
                 try? await Task.sleep(for: .milliseconds(50))
             }
         case .wait(let seconds):
@@ -227,11 +232,11 @@ final class MacComputer: ComputerDriver {
                 remaining -= slice
             }
         case .openApp(let name):
-            try await openApp(named: name)
-            await noteFrontApp()
+            try await openApp(named: name, shouldStop: shouldStop)
+            if !shouldStop() { await noteFrontApp() }
         }
         // A shortcut such as ⌘⇥ may switch apps on purpose.
-        if case .keypress = action { await noteFrontApp() }
+        if case .keypress = action, !shouldStop() { await noteFrontApp() }
     }
 
     // MARK: Whose keys are these
@@ -263,7 +268,7 @@ final class MacComputer: ComputerDriver {
         event.post(tap: .cghidEventTap)
     }
 
-    private func click(_ point: CGPoint, button: ComputerAction.Button, count: Int) async {
+    private func click(_ point: CGPoint, button: ComputerAction.Button, count: Int, shouldStop: () -> Bool) async {
         let (down, up, cgButton): (CGEventType, CGEventType, CGMouseButton) = switch button {
         case .left: (.leftMouseDown, .leftMouseUp, .left)
         case .right: (.rightMouseDown, .rightMouseUp, .right)
@@ -272,41 +277,49 @@ final class MacComputer: ComputerDriver {
         postMouse(.mouseMoved, at: point, button: .left)
         try? await Task.sleep(for: .milliseconds(40))
         for n in 1...max(1, min(count, 3)) {
+            if shouldStop() { return }
             postMouse(down, at: point, button: cgButton, clickState: Int64(n))
             try? await Task.sleep(for: .milliseconds(30))
             postMouse(up, at: point, button: cgButton, clickState: Int64(n))
+            if shouldStop() { return }
             if n < count { try? await Task.sleep(for: .milliseconds(60)) }
         }
     }
 
-    private func drag(_ path: [CGPoint]) async {
-        guard let first = path.first, let last = path.last else { return }
+    private func drag(_ path: [CGPoint], shouldStop: () -> Bool) async {
+        guard let first = path.first else { return }
         postMouse(.mouseMoved, at: first, button: .left)
         try? await Task.sleep(for: .milliseconds(40))
+        if shouldStop() { return }
         postMouse(.leftMouseDown, at: first, button: .left, clickState: 1)
+        var position = first
+        defer { postMouse(.leftMouseUp, at: position, button: .left, clickState: 1) }
         try? await Task.sleep(for: .milliseconds(40))
         var from = first
         for target in path.dropFirst() {
             let distance = hypot(target.x - from.x, target.y - from.y)
             let steps = max(1, Int((distance / 20).rounded(.up)))
             for step in 1...steps {
+                if shouldStop() { return }
                 let t = CGFloat(step) / CGFloat(steps)
-                postMouse(.leftMouseDragged, at: CGPoint(x: from.x + (target.x - from.x) * t, y: from.y + (target.y - from.y) * t), button: .left)
+                position = CGPoint(x: from.x + (target.x - from.x) * t, y: from.y + (target.y - from.y) * t)
+                postMouse(.leftMouseDragged, at: position, button: .left)
                 try? await Task.sleep(for: .milliseconds(8))
             }
             from = target
         }
-        try? await Task.sleep(for: .milliseconds(40))
-        postMouse(.leftMouseUp, at: last, button: .left, clickState: 1)
+        if !shouldStop() { try? await Task.sleep(for: .milliseconds(40)) }
     }
 
-    private func scroll(at point: CGPoint, dx: Double, dy: Double) async {
+    private func scroll(at point: CGPoint, dx: Double, dy: Double, shouldStop: () -> Bool) async {
         postMouse(.mouseMoved, at: point, button: .left)
         try? await Task.sleep(for: .milliseconds(40))
+        if shouldStop() { return }
         let chunks = max(1, Int((max(abs(dx), abs(dy)) / 400).rounded(.up)))
         var sentX = 0.0
         var sentY = 0.0
         for i in 1...chunks {
+            if shouldStop() { return }
             // Positive dy scrolls the content down, which is a negative wheel value.
             let targetX = dx * Double(i) / Double(chunks)
             let targetY = dy * Double(i) / Double(chunks)
@@ -330,17 +343,19 @@ final class MacComputer: ComputerDriver {
         event.post(tap: .cghidEventTap)
     }
 
-    private func type(_ text: String) async {
+    private func type(_ text: String, shouldStop: () -> Bool) async {
         let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
         for (index, line) in lines.enumerated() {
             // One key event per character: apps that treat keys as commands (Calculator) only
             // read the first character of an event, so "12*7" in one event would arrive as "1".
             for character in line {
+                if shouldStop() { return }
                 let key = String(character)
                 let code = ComputerActions.keyStrokes(for: [key])?.first.flatMap { $0.flags.isEmpty ? $0.keyCode : nil } ?? 0
                 await typeUnits(Array(key.utf16), keyCode: code)
             }
             if index < lines.count - 1 {
+                if shouldStop() { return }
                 postKey(36, down: true, flags: [])
                 postKey(36, down: false, flags: [])
                 try? await Task.sleep(for: .milliseconds(20))
@@ -372,10 +387,14 @@ final class MacComputer: ComputerDriver {
 
     // MARK: Apps
 
-    private func openApp(named name: String) async throws {
+    private func openApp(named name: String, shouldStop: () -> Bool) async throws {
         let query = name.lowercased().trimmingCharacters(in: .whitespaces)
         // The index loads asynchronously and can still be empty right after a command-line start.
-        for _ in 0..<30 where AppIndex.shared.apps.isEmpty { try? await Task.sleep(for: .milliseconds(100)) }
+        for _ in 0..<30 where AppIndex.shared.apps.isEmpty {
+            if shouldStop() { return }
+            try? await Task.sleep(for: .milliseconds(100))
+        }
+        if shouldStop() { return }
         var best: (AppEntry, Double)?
         for app in AppIndex.shared.apps {
             let score = ([app.name] + app.aliases).map { FuzzyMatch.score(query, in: $0) }.max() ?? 0
@@ -392,12 +411,12 @@ final class MacComputer: ComputerDriver {
             throw ActionFailure(message: "Couldn't open \(app.name): \(error.localizedDescription)")
         }
         let deadline = Date().addingTimeInterval(5)
-        while Date() < deadline {
+        while !shouldStop(), Date() < deadline {
             if let front = NSWorkspace.shared.frontmostApplication,
                front.bundleURL == app.url || (app.bundleID != nil && front.bundleIdentifier == app.bundleID) { return }
             try? await Task.sleep(for: .milliseconds(80))
         }
-        throw ActionFailure(message: "\(app.name) was opened but did not come to the front")
+        if !shouldStop() { throw ActionFailure(message: "\(app.name) was opened but did not come to the front") }
     }
 
     // MARK: Screen
@@ -434,9 +453,10 @@ final class MacComputer: ComputerDriver {
         return fresh
     }
 
-    private func captureScreen() async throws -> (image: ScreenImage, size: CGSize) {
+    private func captureScreen(shouldStop: () -> Bool) async throws -> (image: ScreenImage, size: CGSize) {
         let displayID = targetDisplayID()
         let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+        if shouldStop() { throw CancellationError() }
         guard let display = content.displays.first(where: { $0.displayID == displayID }) ?? content.displays.first else {
             throw ActionFailure(message: "No display to capture")
         }
@@ -449,6 +469,7 @@ final class MacComputer: ComputerDriver {
         config.height = Int(next.imageSize.height)
         config.showsCursor = true
         let cgImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+        if shouldStop() { throw CancellationError() }
         guard let data = NSBitmapImageRep(cgImage: cgImage).representation(using: .jpeg, properties: [.compressionFactor: 0.8]) else {
             throw ActionFailure(message: "Couldn't encode the screenshot")
         }

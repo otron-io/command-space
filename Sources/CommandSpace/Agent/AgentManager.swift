@@ -191,6 +191,7 @@ final class AgentThread: ObservableObject, Identifiable {
 
     /// Started explicitly as computer use (command line, scripts): Codex only, no instant paths, control pre-approved.
     private(set) var computerUse: Bool
+    private var computerUseRequest: Task<Void, Never>?
     /// Model for a computer-use conversation; nil = the harness's own.
     private(set) var model: String?
 
@@ -267,7 +268,8 @@ final class AgentThread: ObservableObject, Identifiable {
         guard !trimmed.isEmpty else { return }
         SpaceMarkEvents.fire(.send)
         lastActivityAt = Date()
-        Task {
+        let request = Task {
+            guard !Task.isCancelled else { return }
             followUp = nil
             learnOffer = nil
             // The panel and push-to-talk captured the source at invocation. Never recapture here:
@@ -343,6 +345,7 @@ final class AgentThread: ObservableObject, Identifiable {
                     }
                     manager.register(self)
                 }
+                try Task.checkCancellation()
                 isBusy = true
                 // "Summarize this", "move these": give the agent what the user is looking at,
                 // sent so the chat shows only what was said.
@@ -382,15 +385,19 @@ final class AgentThread: ObservableObject, Identifiable {
                 }
                 planReadyItemID = nil
                 try await backend.send(trimmed, context: context, mode: mode, to: sessionID)
+            } catch is CancellationError {
+                isBusy = false
             } catch {
                 isBusy = false
                 appendError("Couldn't reach \(harness.name): \(error.localizedDescription)")
                 if showResult { showResultWhenDone = false; manager.announceResult(of: self, dwell: 6) }
             }
         }
+        if computerUse { computerUseRequest = request }
     }
 
     func abort() {
+        computerUseRequest?.cancel()
         guard !sessionID.isEmpty else { return }
         backend.abort(sessionID)
     }

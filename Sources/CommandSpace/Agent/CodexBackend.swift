@@ -29,7 +29,11 @@ final class CodexBackend: AgentBackend {
     private var restartDelay: Double = 1
     /// Threads loaded in this app-server (others need `thread/resume` first).
     private var loaded: Set<String> = []
-    private var activeTurn: [String: String] = [:]
+    private final class Turn {
+        var id: String?
+        var interrupted = false
+    }
+    private var activeTurn: [String: Turn] = [:]
     /// Approval id -> the JSON-RPC request id to answer, and what kind of approval it is.
     private var approvals: [String: (rpcID: Any, method: String)] = [:]
     private var commandNames: [String: String] = [:]
@@ -110,12 +114,13 @@ final class CodexBackend: AgentBackend {
             AgentBackendSink.event(harness, permission.sessionID, .permissionResolved(permission.id))
         }
         openPermissions = [:]
+        let tail = stderr.split(separator: "\n").last.map(String.init) ?? "exit \(status)"
         for session in activeTurn.keys {
             ComputerTool.shared.turnEnded(session)
+            AgentBackendSink.event(harness, session, .error("Codex stopped (\(tail))"))
             AgentBackendSink.event(harness, session, .busy(false))
         }
         activeTurn = [:]
-        let tail = stderr.split(separator: "\n").last.map(String.init) ?? "exit \(status)"
         connection = .offline("Codex stopped (\(tail)). Restarting…")
         let delay = restartDelay
         restartDelay = min(restartDelay * 2, 30)
@@ -205,7 +210,24 @@ final class CodexBackend: AgentBackend {
     func setMode(_ mode: AgentMode, for session: String) { modes[session] = mode }
 
     func send(_ text: String, context: AgentRequestContext?, mode: AgentMode, to session: String) async throws {
+        guard activeTurn[session] == nil else { throw CodexError(message: "A turn is already running") }
+        let turn = Turn()
+        activeTurn[session] = turn
+        do {
+            try await startTurn(text, context: context, mode: mode, session: session, turn: turn)
+        } catch {
+            if activeTurn[session] === turn {
+                activeTurn[session] = nil
+                ComputerTool.shared.turnEnded(session)
+                AgentBackendSink.event(harness, session, .busy(false))
+            }
+            throw error
+        }
+    }
+
+    private func startTurn(_ text: String, context: AgentRequestContext?, mode: AgentMode, session: String, turn: Turn) async throws {
         try await ready()
+        guard !turn.interrupted, activeTurn[session] === turn else { throw CancellationError() }
         modes[session] = mode
         if !loaded.contains(session) {
             var params = threadSettings
@@ -214,24 +236,39 @@ final class CodexBackend: AgentBackend {
             _ = try await call("thread/resume", params)
             loaded.insert(session)
         }
+        guard !turn.interrupted, activeTurn[session] === turn else { throw CancellationError() }
         let policy = Self.policy(for: mode)
         var params: [String: Any] = ["threadId": session, "input": AgentInput.codex(text, context: context, planning: mode == .plan),
                                      "approvalPolicy": policy.approval, "sandboxPolicy": policy.sandbox]
         let model = sessionModels[session] ?? Defaults[.codexModel]
         if !model.isEmpty { params["model"] = model }
         AgentBackendSink.event(harness, session, .busy(true))
-        do {
-            let result = try await call("turn/start", params) as? [String: Any]
-            if let turn = (result?["turn"] as? [String: Any])?["id"] as? String { activeTurn[session] = turn }
-        } catch {
-            AgentBackendSink.event(harness, session, .busy(false))
-            throw error
+        let result = try await call("turn/start", params) as? [String: Any]
+        guard let id = (result?["turn"] as? [String: Any])?["id"] as? String else {
+            throw CodexError(message: "Codex didn’t return a turn ID")
         }
+        if activeTurn[session] === turn { recordTurnID(id, session: session, turn: turn) }
     }
 
     func abort(_ session: String) {
-        guard let turn = activeTurn[session] else { return }
-        Task { _ = try? await call("turn/interrupt", ["threadId": session, "turnId": turn]) }
+        guard let turn = activeTurn[session], !turn.interrupted else { return }
+        turn.interrupted = true
+        ComputerTool.shared.stopTurn(session)
+        if let id = turn.id { interrupt(id, session: session, turn: turn) }
+    }
+
+    /// A stop can arrive before Codex sends the ID needed for turn/interrupt.
+    private func recordTurnID(_ id: String, session: String, turn: Turn) {
+        guard turn.id == nil else { return }
+        turn.id = id
+        if turn.interrupted { interrupt(id, session: session, turn: turn) }
+    }
+
+    private func interrupt(_ id: String, session: String, turn: Turn) {
+        Task {
+            guard activeTurn[session] === turn else { return }
+            _ = try? await call("turn/interrupt", ["threadId": session, "turnId": id])
+        }
     }
 
     func reply(to permission: AgentPermission, with reply: PermissionReply) {
@@ -398,9 +435,17 @@ final class CodexBackend: AgentBackend {
                 respond(id, ["contentItems": [["type": "inputText", "text": "Unknown tool"]], "success": false])
                 return
             }
-            let mode = modes[session] ?? .ask
+            guard let servingProcess = process else { return }
             Task {
+                guard process === servingProcess else { return }
+                guard let turn = activeTurn[session], !turn.interrupted,
+                      let turnID = params["turnId"] as? String, turn.id == turnID else {
+                    respond(id, ["contentItems": [["type": "inputText", "text": "This turn is no longer active."]], "success": false])
+                    return
+                }
+                let mode = modes[session] ?? .ask
                 let result = await ComputerTool.shared.call(arguments: arguments, session: session, harness: harness, mode: mode)
+                guard process === servingProcess else { return }
                 var items: [[String: Any]] = [["type": "inputText", "text": result.text]]
                 if let image = result.image { items.append(["type": "inputImage", "imageUrl": image.dataURL]) }
                 respond(id, ["contentItems": items, "success": result.success])
@@ -431,13 +476,18 @@ final class CodexBackend: AgentBackend {
         let send = { (event: AgentEvent) in AgentBackendSink.event(self.harness, session, event) }
         switch method {
         case "turn/started":
-            if let turn = (params["turn"] as? [String: Any])?["id"] as? String { activeTurn[session] = turn }
+            guard let turn = activeTurn[session], let id = (params["turn"] as? [String: Any])?["id"] as? String,
+                  turn.id == nil || turn.id == id else { return }
+            recordTurnID(id, session: session, turn: turn)
             send(.busy(true))
         case "turn/completed":
+            let turn = params["turn"] as? [String: Any]
+            guard let active = activeTurn[session], active.id == nil || active.id == turn?["id"] as? String else { return }
             activeTurn[session] = nil
             ComputerTool.shared.turnEnded(session)
-            let turn = params["turn"] as? [String: Any]
-            if turn?["status"] as? String == "failed",
+            if active.interrupted || turn?["status"] as? String == "interrupted" {
+                send(.error("Stopped"))
+            } else if turn?["status"] as? String == "failed",
                let message = (turn?["error"] as? [String: Any])?["message"] as? String {
                 send(.error(message))
             }
