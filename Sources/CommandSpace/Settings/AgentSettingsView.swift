@@ -708,17 +708,23 @@ struct SystemOneStatus: View {
     }
 
     private var state: (Bool, String) {
-        let hasKey = DecisionEngine.shared.hasJevKey
         let snapReady: Bool = { if case .installed = store.status { return true } else { return false } }()
         switch backend {
         case .jev:
-            return hasKey ? (true, "Jev") : (false, "Jev · no key saved")
+            switch JevKeychain.credential.status {
+            case .available: return (true, "Jev")
+            case .needsAccess: return (false, "Jev · Keychain access needed")
+            case .missing: return (false, "Jev · no key saved")
+            case .unavailable: return (false, "Jev · couldn't read Keychain")
+            }
         case .local:
             if snapReady { return (true, "Snap 1 · on this Mac") }
             if case .downloading(let f) = store.status { return (false, "Downloading Snap 1 · \(Int(f * 100))%") }
-            return (false, hasKey ? "Snap 1 not downloaded · using Jev" : "Snap 1 not downloaded")
+            return (false, DecisionEngine.shared.hasJevKey ? "Snap 1 not downloaded · using Jev" : "Snap 1 not downloaded")
         case .shadow:
-            if !hasKey { return (false, "Compare needs a Jev key") }
+            let status = JevKeychain.credential.status
+            if status == .needsAccess { return (false, "Jev · Keychain access needed") }
+            if status != .available { return (false, "Compare needs a Jev key") }
             return snapReady ? (true, "Jev · comparing with Snap 1") : (false, "Jev · Snap 1 not downloaded")
         }
     }
@@ -788,29 +794,37 @@ private struct SnapModelSection: View {
 private struct JevSettingsSection: View {
     @Default(.jevModel) private var jevModel
     @State private var key = ""
-    @State private var hasKey = false
+    @State private var keyStatus = KeychainCredential.Status.missing
     @State private var saveStatus: String?
     @State private var testResult: String?
     @State private var isTesting = false
 
+    private var hasSavedKey: Bool { keyStatus == .available || keyStatus == .needsAccess }
+
     var body: some View {
         Section {
             HStack {
-                SecureField("API key", text: $key, prompt: Text(hasKey ? "Saved in Keychain" : "Not set"))
+                SecureField("API key", text: $key, prompt: Text(hasSavedKey ? "Saved in Keychain" : "API key"))
                 Button("Save") {
                     let ok = JevKeychain.save(key)
-                    key = ""
-                    hasKey = JevKeychain.load() != nil
-                    saveStatus = ok ? (hasKey ? "Saved" : "Removed") : "Couldn't save to Keychain"
+                    if ok { key = "" }
+                    keyStatus = JevKeychain.credential.status
+                    saveStatus = ok ? "Saved" : "Couldn't save to Keychain"
                 }
-                .disabled(key.trimmingCharacters(in: .whitespaces).isEmpty)
-                if hasKey {
+                .disabled(isTesting || key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if hasSavedKey {
                     Button("Remove") {
-                        JevKeychain.delete()
-                        hasKey = false
-                        saveStatus = "Removed"
+                        let ok = JevKeychain.delete()
+                        keyStatus = JevKeychain.credential.status
+                        saveStatus = ok ? "Removed" : "Couldn't remove the key from Keychain"
                     }
+                    .disabled(isTesting)
                 }
+            }
+            if keyStatus == .needsAccess {
+                Text("Click Test to request access to your saved key.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             if let saveStatus {
                 Text(saveStatus)
@@ -832,6 +846,7 @@ private struct JevSettingsSection: View {
                     testResult = nil
                     Task {
                         testResult = await DecisionEngine.shared.testJev()
+                        keyStatus = JevKeychain.credential.status
                         isTesting = false
                     }
                 }
@@ -844,7 +859,7 @@ private struct JevSettingsSection: View {
                 .foregroundStyle(.secondary)
                 .font(.caption)
         }
-        .onAppear { hasKey = JevKeychain.load() != nil }
+        .onAppear { keyStatus = JevKeychain.credential.status }
     }
 }
 
