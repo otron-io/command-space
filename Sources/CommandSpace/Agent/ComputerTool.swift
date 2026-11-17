@@ -120,6 +120,7 @@ final class ComputerTool: ObservableObject {
         if shouldStop() { return stopped() }
         log.notice("computer call: \(ComputerActions.summary(of: arguments), privacy: .private)")
         let result = await driver.perform(actions, shouldStop: shouldStop)
+        if shouldStop(), result.success || result.image != nil { return stopped() }
         if result.success { lastLookSucceeded = true }
         return result
     }

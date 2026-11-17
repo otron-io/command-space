@@ -213,18 +213,19 @@ final class MacComputer: ComputerDriver {
         case .scroll(let x, let y, let dx, let dy):
             await scroll(at: currentGeometry().point(x: x, y: y), dx: dx, dy: dy, shouldStop: shouldStop)
         case .type(let text):
-            try checkFrontApp()
+            let target = try keyboardTarget()
             if Self.focusedFieldIsSecure() {
                 throw ActionFailure(message: "The focused field is a password field. Passwords must be typed by the user; ask them to do it.")
             }
-            await type(text, shouldStop: shouldStop)
+            try await type(text, target: target, shouldStop: shouldStop)
         case .keypress(let keys):
             guard let strokes = ComputerActions.keyStrokes(for: keys) else {
                 throw ActionFailure(message: "Unknown key in [\(keys.joined(separator: ", "))]. Use names like CMD, SHIFT, ENTER, TAB, ESC, UP, F5 or single letters.")
             }
-            try checkFrontApp()
+            let target = try keyboardTarget()
             for stroke in strokes {
                 if shouldStop() { return }
+                try checkFrontApp(target)
                 postKey(stroke.keyCode, down: true, flags: stroke.flags)
                 try? await Task.sleep(for: .milliseconds(50))
                 postKey(stroke.keyCode, down: false, flags: stroke.flags)
@@ -250,10 +251,19 @@ final class MacComputer: ComputerDriver {
 
     /// Keys go to whatever has focus. If the user switched apps since the model last looked,
     /// typing would land in their window (a chat box, a terminal), so the batch stops instead.
-    private func checkFrontApp() throws {
-        guard let expected = expectedFront, let front = NSWorkspace.shared.frontmostApplication,
-              front.processIdentifier != expected else { return }
-        throw ActionFailure(message: "The app in front changed to \(front.localizedName ?? "another app") since you last looked, so nothing was typed: the user may be using the computer. Take a screenshot and check before continuing.")
+    private func keyboardTarget() throws -> pid_t {
+        if let expectedFront { return expectedFront }
+        guard let front = NSWorkspace.shared.frontmostApplication else {
+            throw ActionFailure(message: "There is no frontmost app for keyboard input.")
+        }
+        return front.processIdentifier
+    }
+
+    private func checkFrontApp(_ expected: pid_t) throws {
+        let front = NSWorkspace.shared.frontmostApplication
+        guard front?.processIdentifier == expected else {
+            throw ActionFailure(message: "The app in front changed to \(front?.localizedName ?? "another app"), so keyboard input stopped. Take a screenshot before continuing.")
+        }
     }
 
     /// After an action of ours that can change the front app, that app is the one keys are meant for.
@@ -350,19 +360,21 @@ final class MacComputer: ComputerDriver {
         event.post(tap: .cghidEventTap)
     }
 
-    private func type(_ text: String, shouldStop: () -> Bool) async {
+    private func type(_ text: String, target: pid_t, shouldStop: () -> Bool) async throws {
         let lines = text.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n")
         for (index, line) in lines.enumerated() {
             // One key event per character: apps that treat keys as commands (Calculator) only
             // read the first character of an event, so "12*7" in one event would arrive as "1".
             for character in line {
                 if shouldStop() { return }
+                try checkFrontApp(target)
                 let key = String(character)
                 let code = ComputerActions.keyStrokes(for: [key])?.first.flatMap { $0.flags.isEmpty ? $0.keyCode : nil } ?? 0
                 await typeUnits(Array(key.utf16), keyCode: code)
             }
             if index < lines.count - 1 {
                 if shouldStop() { return }
+                try checkFrontApp(target)
                 postKey(36, down: true, flags: [])
                 postKey(36, down: false, flags: [])
                 try? await Task.sleep(for: .milliseconds(20))
