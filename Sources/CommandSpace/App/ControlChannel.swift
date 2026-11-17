@@ -181,6 +181,67 @@ private struct LineBuffer {
 
 // MARK: - App side
 
+/// Serializes writes on a dedicated queue. The duplicate keeps the descriptor alive until
+/// queued operations finish, even if the read source closes its own descriptor meanwhile.
+private final class ConnectionWriter: @unchecked Sendable {
+    private let fd: Int32
+    private let queue = DispatchQueue(label: "io.otron.commandspace.control-writer")
+    private let lock = NSLock()
+    private var cancelled = false
+    private var pendingBytes = 0
+    private let limit = 64 * 1024 * 1024
+    private let failed: @Sendable () -> Void
+
+    init?(fd: Int32, failed: @escaping @Sendable () -> Void) {
+        let duplicate = fcntl(fd, F_DUPFD_CLOEXEC, 0)
+        guard duplicate >= 0 else { return nil }
+        self.fd = duplicate
+        self.failed = failed
+    }
+
+    func send(_ data: Data) -> Bool {
+        lock.lock()
+        guard !cancelled, data.count <= limit - pendingBytes else {
+            lock.unlock()
+            return false
+        }
+        pendingBytes += data.count
+        lock.unlock()
+        queue.async { [self] in
+            lock.lock()
+            let active = !cancelled
+            lock.unlock()
+            let success = !active || Sock.writeAll(fd, data)
+            lock.lock()
+            pendingBytes -= data.count
+            let report = !success && !cancelled
+            if report { cancelled = true }
+            lock.unlock()
+            if report { failed() }
+        }
+        return true
+    }
+
+    /// Close only after every prior write has completed.
+    func flush(_ completed: @escaping @Sendable () -> Void) {
+        queue.async { [self] in
+            lock.lock()
+            let active = !cancelled
+            lock.unlock()
+            if active { completed() }
+        }
+    }
+
+    func cancel() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+        // Interrupt a blocked poll/write before closing the duplicate on its queue.
+        shutdown(fd, SHUT_RDWR)
+        queue.async { [self] in _ = Darwin.close(fd) }
+    }
+}
+
 /// One client connected to the app. All callbacks arrive on the main actor.
 @MainActor
 final class ControlConnection {
@@ -192,6 +253,8 @@ final class ControlConnection {
     private var lines = LineBuffer()
     private var scratch = [UInt8](repeating: 0, count: 64 * 1024)
     private var finished = false
+    private var closing = false
+    private var writer: ConnectionWriter?
     private var hasRequest = false
     private var onRequest: (([String: Any], ControlConnection) -> Void)?
     private var onFinished: ((ControlConnection) -> Void)?
@@ -205,6 +268,10 @@ final class ControlConnection {
 
     fileprivate func start() {
         let fd = self.fd
+        writer = ConnectionWriter(fd: fd) { [weak self] in
+            DispatchQueue.main.async { self?.finish(notify: true) }
+        }
+        guard writer != nil else { finish(notify: false); return }
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
         source.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.readable() } }
         source.setCancelHandler { _ = Darwin.close(fd) }
@@ -212,22 +279,22 @@ final class ControlConnection {
         source.resume()
     }
 
-    /// Sends one JSON object as a line. Safe to call after the peer has gone (it does nothing).
+    /// Sends one JSON object as a line without blocking the main actor.
     func send(_ message: [String: Any]) {
-        guard !finished, let data = Sock.line(for: message) else { return }
-        if !Sock.writeAll(fd, data) {
-            // The read side reports the disconnect; just stop writing.
-            shutdown(fd, SHUT_WR)
+        guard !finished, !closing, let data = Sock.line(for: message) else { return }
+        if writer?.send(data) != true { finish(notify: hasRequest) }
+    }
+
+    /// Flushes queued replies before closing. Idempotent.
+    func close() {
+        guard !finished, !closing else { return }
+        closing = true
+        writer?.flush { [weak self] in
+            DispatchQueue.main.async { self?.finish(notify: false) }
         }
     }
 
-    /// Flushes what was sent and closes. Idempotent.
-    func close() {
-        guard !finished else { return }
-        // Sends are synchronous, so everything is already queued for the peer; closing keeps it readable.
-        shutdown(fd, SHUT_WR)
-        finish(notify: false)
-    }
+    fileprivate func stop() { finish(notify: hasRequest) }
 
     private func readable() {
         guard !finished else { return }
@@ -252,7 +319,9 @@ final class ControlConnection {
     private func finish(notify: Bool) {
         guard !finished else { return }
         finished = true
-        source?.cancel()
+        writer?.cancel()
+        writer = nil
+        if let source { source.cancel() } else { Darwin.close(fd) }
         source = nil
         let callback = onClose
         onClose = nil
@@ -331,7 +400,7 @@ final class ControlServer {
         handler = nil
         let open = Array(connections.values)
         connections.removeAll()
-        for connection in open { connection.close() }
+        for connection in open { connection.stop() }
         if let path = ownedPath {
             var info = stat()
             if lstat(path, &info) == 0, info.st_ino == ownedInode { unlink(path) }
@@ -383,15 +452,11 @@ enum ControlClient {
     static func run(_ request: [String: Any], onMessage: @escaping @MainActor ([String: Any]) -> Void) async throws {
         guard let data = Sock.line(for: request) else { throw CocoaError(.coderInvalidValue) }
         guard let fd = Sock.connectClient(to: ControlChannel.socketPath) else { throw NotRunning() }
-        guard Sock.writeAll(fd, data) else {
-            close(fd)
-            throw NotRunning()
-        }
         current?.finish()
         let session = ClientSession(fd: fd, onMessage: onMessage)
         current = session
-        await withCheckedContinuation { continuation in session.begin(continuation) }
-        if current === session { current = nil }
+        defer { if current === session { current = nil } }
+        try await withCheckedThrowingContinuation { session.begin(request: data, continuation: $0) }
     }
 
     /// Closes the connection opened by the current `run` (if any), so the app sees the client leave. For ⌃C handlers.
@@ -406,7 +471,8 @@ private final class ClientSession {
     private let fd: Int32
     private let onMessage: @MainActor ([String: Any]) -> Void
     private var source: DispatchSourceRead?
-    private var continuation: CheckedContinuation<Void, Never>?
+    private var writer: ConnectionWriter?
+    private var continuation: CheckedContinuation<Void, Error>?
     private var lines = LineBuffer()
     private var scratch = [UInt8](repeating: 0, count: 64 * 1024)
     private var done = false
@@ -416,9 +482,16 @@ private final class ClientSession {
         self.onMessage = onMessage
     }
 
-    func begin(_ continuation: CheckedContinuation<Void, Never>) {
+    func begin(request: Data, continuation: CheckedContinuation<Void, Error>) {
         self.continuation = continuation
         let fd = self.fd
+        writer = ConnectionWriter(fd: fd) { [weak self] in
+            DispatchQueue.main.async { self?.finish(error: ControlClient.NotRunning()) }
+        }
+        guard writer?.send(request) == true else {
+            finish(error: ControlClient.NotRunning())
+            return
+        }
         let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: .main)
         source.setEventHandler { [weak self] in MainActor.assumeIsolated { self?.readable() } }
         source.setCancelHandler { _ = Darwin.close(fd) }
@@ -426,14 +499,16 @@ private final class ClientSession {
         source.resume()
     }
 
-    func finish() {
+    func finish(error: Error? = nil) {
         guard !done else { return }
         done = true
-        source?.cancel()
+        writer?.cancel()
+        writer = nil
+        if let source { source.cancel() } else { Darwin.close(fd) }
         source = nil
         let waiting = continuation
         continuation = nil
-        waiting?.resume()
+        if let error { waiting?.resume(throwing: error) } else { waiting?.resume() }
     }
 
     private func readable() {

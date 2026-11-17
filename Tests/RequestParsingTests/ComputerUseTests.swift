@@ -167,7 +167,10 @@ private final class FakeComputer: ComputerDriver {
     private(set) var batches: [[ComputerAction]] = []
     var pauseNextBatch = false
     private(set) var stopRequested: (() -> Bool)?
+    private(set) var observationResets = 0
     private var heldBatch: CheckedContinuation<Void, Never>?
+
+    func resetObservation() { observationResets += 1 }
 
     func perform(_ actions: [ComputerAction], shouldStop: @escaping () -> Bool) async -> ComputerResult {
         batches.append(actions)
@@ -485,6 +488,32 @@ final class ComputerToolRulesTests: XCTestCase {
         let result = await first.value
         XCTAssertFalse(result.success)
         XCTAssertNil(tool.controlling)
+    }
+
+    func testTurnOwnershipProtectsObservationsAfterEachBatch() async {
+        tool.headless = true
+        let first = newSession()
+        let second = newSession()
+        let firstLook = await call(shot, first, .fullAccess)
+        XCTAssertTrue(firstLook.success)
+        let blockedLook = await call(shot, second, .fullAccess)
+        XCTAssertFalse(blockedLook.success)
+        XCTAssertEqual(tool.controlling, first)
+
+        tool.turnEnded(first)
+        let stale = await call(click, second, .fullAccess)
+        XCTAssertFalse(stale.success)
+        XCTAssertTrue(stale.text.contains("fresh screenshot"))
+        let secondLook = await call(shot, second, .fullAccess)
+        XCTAssertTrue(secondLook.success)
+        let secondAction = await call(click, second, .fullAccess)
+        XCTAssertTrue(secondAction.success)
+        XCTAssertEqual(fake.observationResets, 2)
+
+        tool.turnEnded(second)
+        let returning = await call(click, first, .fullAccess)
+        XCTAssertFalse(returning.success)
+        XCTAssertEqual(fake.batches.count, 3)
     }
 
     func testCardDescribesTheRequest() async {

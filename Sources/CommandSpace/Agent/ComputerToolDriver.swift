@@ -24,6 +24,8 @@ struct ComputerResult {
 
 @MainActor
 protocol ComputerDriver: AnyObject {
+    /// Clear the coordinate and focus assumptions from the previous conversation.
+    func resetObservation()
     /// Runs the actions in order (stopping early if `shouldStop()` turns true), then returns what the screen looks like.
     func perform(_ actions: [ComputerAction], shouldStop: @escaping () -> Bool) async -> ComputerResult
 }
@@ -112,6 +114,11 @@ final class MacComputer: ComputerDriver {
     private var expectedFront: pid_t?
     private let source = CGEventSource(stateID: .hidSystemState)
     private init() {}
+
+    func resetObservation() {
+        geometry = nil
+        expectedFront = nil
+    }
 
     // MARK: Batch
 

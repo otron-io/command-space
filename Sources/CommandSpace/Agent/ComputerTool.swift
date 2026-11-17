@@ -26,7 +26,9 @@ final class ComputerTool: ObservableObject {
     static let shared = ComputerTool()
     static let permissionKind = "computer"
 
-    var driver: ComputerDriver = MacComputer.shared
+    var driver: ComputerDriver = MacComputer.shared {
+        didSet { lastDriverSession = nil }
+    }
     /// Command-line runs: no panel, pill or approval cards.
     var headless = false
     /// What macOS access is missing, as a sentence, or nil when control can work. Replaced in tests.
@@ -51,6 +53,8 @@ final class ComputerTool: ObservableObject {
     private var cards: [String: Card] = [:]  // by session
     private var flags: [String: StopFlag] = [:]
     private var runningBatch = false
+    private var lastDriverSession: String?
+    private var lastLookSucceeded = true
     private var monitors: [Any] = []
     private init() {}
 
@@ -76,7 +80,9 @@ final class ComputerTool: ObservableObject {
         flags[session] = flag
         func shouldStop() -> Bool { flag.stopped || Task.isCancelled }
         func stopped() -> ComputerResult { fail("Computer control was stopped. Do not continue the task.") }
+        func busy() -> ComputerResult { fail("Another computer action or turn is still in control. Wait for it to finish.") }
         if shouldStop() { return stopped() }
+        guard canUseDriver(session) else { return busy() }
         let granted = mode == .fullAccess || conversationGrants.contains(session) || taskGrants.contains(session)
         if headless {
             if !granted { return fail("The user has not allowed computer control for this conversation.") }
@@ -93,8 +99,15 @@ final class ComputerTool: ObservableObject {
             if let missing = missingAccess() { return fail(missing) }
         }
 
-        guard !runningBatch else {
-            return fail("Another computer action batch is still running. Wait for it to finish before using the computer again.")
+        guard canUseDriver(session) else { return busy() }
+        let needsLook = lastDriverSession.map { $0 != session || !lastLookSucceeded } ?? false
+        if needsLook, actions.contains(where: { !$0.isReadOnly }) {
+            return fail("Take a fresh screenshot before acting. Another conversation used the computer since you last looked.")
+        }
+        if lastDriverSession != session {
+            driver.resetObservation()
+            lastDriverSession = session
+            lastLookSucceeded = !needsLook
         }
         runningBatch = true
         controlling = session
@@ -106,7 +119,14 @@ final class ComputerTool: ObservableObject {
         if !headless { await leaveCommandSpace(shouldStop: shouldStop) }
         if shouldStop() { return stopped() }
         log.notice("computer call: \(ComputerActions.summary(of: arguments), privacy: .private)")
-        return await driver.perform(actions, shouldStop: shouldStop)
+        let result = await driver.perform(actions, shouldStop: shouldStop)
+        if result.success { lastLookSucceeded = true }
+        return result
+    }
+
+    /// Retain the screenshot and focus context for one turn, including gaps between batches.
+    private func canUseDriver(_ session: String) -> Bool {
+        !runningBatch && (controlling == nil || controlling == session)
     }
 
     // MARK: Approval
