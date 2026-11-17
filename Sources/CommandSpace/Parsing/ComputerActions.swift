@@ -87,6 +87,16 @@ enum ComputerActions {
     Coordinates are pixels in the most recent screenshot, origin at the top-left.
     Start with a screenshot. When you are sure of several steps (click a field, type, press ENTER), batch them in one call; \
     otherwise do a few actions and look again.
+    \(scriptResultNote)
+    """
+
+    /// Codex usually runs tools from a script, where the result arrives as one string (text, then the
+    /// screenshot's data URI). Models guess `r.content` and see nothing, which hides a refusal.
+    static let scriptResultNote = """
+    From a script (exec), `await tools.computer({actions: [...]})` returns one string: the result text, then the \
+    screenshot as a `data:image/jpeg;base64,...` URI when there is one. Show both, for example: \
+    `const i = r.indexOf("data:image/"); text(i < 0 ? r : r.slice(0, i)); if (i >= 0) image(r.slice(i));`. \
+    Always read the text: it says whether the actions ran, or were refused or stopped.
     """
 
     private static let kinds = ["screenshot", "click", "double_click", "right_click", "move", "drag", "scroll", "type", "keypress", "wait", "open_app"]
@@ -134,6 +144,7 @@ enum ComputerActions {
     this conversation and already set up: call it directly. Don't first look for skills, plugins, MCP servers or \
     documentation about computer use, and don't substitute `screencapture` or AppleScript UI scripting for it.
     - Prefer shell commands or AppleScript when they do the job directly. Use `computer` when only an app's UI can do it, or the user asks you to operate an app.
+    - \(scriptResultNote)
     - Always look (screenshot) before acting, and check the screenshot after each batch of actions.
     - Use open_app to bring an app forward rather than clicking the Dock. Keyboard shortcuts are usually more reliable than small click targets.
     - The user sees an approval before control starts and can press esc to stop you. If a result says the user declined or stopped, stop immediately.
