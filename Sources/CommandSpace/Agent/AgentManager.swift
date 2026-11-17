@@ -475,9 +475,11 @@ final class AgentThread: ObservableObject, Identifiable {
         taskStartedAt = nil
         retry = nil
         modelStatus = nil
-        Task { await checkDone() }
-        if DecisionEngine.shared.decisionsAvailable, Defaults[.jevInstantActions] {
-            learnOffer = LearnedActions.shared.candidate(from: items)
+        if !computerUse {
+            Task { await checkDone() }
+            if Defaults[.jevInstantActions], DecisionEngine.shared.decisionsAvailable {
+                learnOffer = LearnedActions.shared.candidate(from: items)
+            }
         }
         if let last = items.last, last.kind == .assistant {
             SpaceMarkEvents.fire(.success)

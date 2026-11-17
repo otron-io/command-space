@@ -99,6 +99,10 @@ enum ComputerActions {
     Always read the text: it says whether the actions ran, or were refused or stopped.
     """
 
+    private static let maxCoordinate = 1_000_000.0
+    private static let maxScroll = 10_000.0
+    private static let maxDragPoints = 100
+
     private static let kinds = ["screenshot", "click", "double_click", "right_click", "move", "drag", "scroll", "type", "keypress", "wait", "open_app"]
 
     static let inputSchema: [String: Any] = [
@@ -116,11 +120,13 @@ enum ComputerActions {
                         "button": ["type": "string", "enum": ["left", "right", "middle"], "description": "Mouse button for click (default left)."],
                         "text": ["type": "string", "description": "Text to type (type)."],
                         "keys": ["type": "array", "items": ["type": "string"], "description": "Keys to press, e.g. [\"CMD\",\"C\"] or [\"ENTER\"] (keypress)."],
-                        "scroll_x": ["type": "number", "description": "Horizontal scroll in pixels, positive scrolls right (scroll)."],
-                        "scroll_y": ["type": "number", "description": "Vertical scroll in pixels, positive scrolls down (scroll)."],
+                        "scroll_x": ["type": "number", "minimum": -maxScroll, "maximum": maxScroll, "description": "Horizontal scroll in pixels, positive scrolls right (scroll)."],
+                        "scroll_y": ["type": "number", "minimum": -maxScroll, "maximum": maxScroll, "description": "Vertical scroll in pixels, positive scrolls down (scroll)."],
                         "path": [
                             "type": "array",
-                            "description": "Points to drag through, at least two (drag).",
+                            "description": "Points to drag through (drag).",
+                            "minItems": 2,
+                            "maxItems": maxDragPoints,
                             "items": ["type": "object", "properties": ["x": ["type": "number"], "y": ["type": "number"]], "required": ["x", "y"]],
                         ],
                         "seconds": ["type": "number", "description": "How long to wait, 0.1 to 10 (wait)."],
@@ -221,8 +227,13 @@ enum ComputerActions {
         let label = "actions[\(index)] (\(kind))"
 
         func point() -> (Double, Double)? {
-            guard let x = number(dict["x"]), let y = number(dict["y"]) else { return nil }
+            guard let x = coordinate(dict["x"]), let y = coordinate(dict["y"]) else { return nil }
             return (x, y)
+        }
+
+        func invalidPoint() -> Result<ComputerAction, ComputerActionError> {
+            if dict["x"] == nil || dict["y"] == nil { return fail("\(label) needs x and y") }
+            return fail("\(label) x and y must be finite numbers between -\(Int(maxCoordinate)) and \(Int(maxCoordinate))")
         }
 
         switch kind {
@@ -230,7 +241,7 @@ enum ComputerActions {
             return .success(.screenshot)
 
         case "click", "left_click", "double_click", "triple_click", "right_click", "middle_click":
-            guard let (x, y) = point() else { return fail("\(label) needs x and y") }
+            guard let (x, y) = point() else { return invalidPoint() }
             var button = ComputerAction.Button.left
             var count = 1
             switch kind {
@@ -246,25 +257,30 @@ enum ComputerActions {
                 }
                 button = parsedButton
             }
-            if kind == "click" || kind == "left_click", let n = number(dict["count"]) ?? number(dict["clicks"]) {
-                count = min(max(Int(n), 1), 3)
+            if kind == "click" || kind == "left_click", let rawCount = dict["count"] ?? dict["clicks"] {
+                guard let n = number(rawCount), n.isFinite else { return fail("\(label) count must be a finite number") }
+                count = Int(min(max(n, 1), 3))
             }
             return .success(.click(x: x, y: y, button: button, count: count))
 
         case "move", "mouse_move":
-            guard let (x, y) = point() else { return fail("\(label) needs x and y") }
+            guard let (x, y) = point() else { return invalidPoint() }
             return .success(.move(x: x, y: y))
 
         case "drag", "left_click_drag":
-            guard let path = dragPath(dict), path.count >= 2 else {
-                return fail("\(label) needs a path of at least two points, or from/to, or start_x, start_y, end_x, end_y")
+            guard let path = dragPath(dict) else {
+                return fail("\(label) needs 2 to \(maxDragPoints) valid points, or from/to, or start_x, start_y, end_x, end_y")
             }
             return .success(.drag(path: path))
 
         case "scroll":
-            guard let (x, y) = point() else { return fail("\(label) needs x and y") }
-            let dx = number(dict["scroll_x"]) ?? number(dict["dx"]) ?? 0
-            let dy = number(dict["scroll_y"]) ?? number(dict["dy"]) ?? 0
+            guard let (x, y) = point() else { return invalidPoint() }
+            let rawX = dict["scroll_x"] ?? dict["dx"]
+            let rawY = dict["scroll_y"] ?? dict["dy"]
+            guard let dx = rawX == nil ? 0 : number(rawX), dx.isFinite, abs(dx) <= maxScroll,
+                  let dy = rawY == nil ? 0 : number(rawY), dy.isFinite, abs(dy) <= maxScroll else {
+                return fail("\(label) scroll distances must be finite numbers between -\(Int(maxScroll)) and \(Int(maxScroll))")
+            }
             return .success(.scroll(x: x, y: y, dx: dx, dy: dy))
 
         case "type":
@@ -289,9 +305,11 @@ enum ComputerActions {
 
         case "wait":
             var seconds = 1.0
-            if let s = number(dict["seconds"]) {
+            if let raw = dict["seconds"] {
+                guard let s = number(raw), s.isFinite else { return fail("\(label) seconds must be a finite number") }
                 seconds = s
-            } else if let ms = number(dict["ms"]) ?? number(dict["duration_ms"]) {
+            } else if let raw = dict["ms"] ?? dict["duration_ms"] {
+                guard let ms = number(raw), ms.isFinite else { return fail("\(label) milliseconds must be a finite number") }
                 seconds = ms / 1000
             }
             return .success(.wait(seconds: min(max(seconds, 0.1), 10)))
@@ -318,11 +336,16 @@ enum ComputerActions {
         }
     }
 
+    private static func coordinate(_ value: Any?) -> Double? {
+        guard let n = number(value), n.isFinite, abs(n) <= maxCoordinate else { return nil }
+        return n
+    }
+
     private static func pointValue(_ value: Any?) -> CGPoint? {
-        if let dict = value as? [String: Any], let x = number(dict["x"]), let y = number(dict["y"]) {
+        if let dict = value as? [String: Any], let x = coordinate(dict["x"]), let y = coordinate(dict["y"]) {
             return CGPoint(x: x, y: y)
         }
-        if let pair = value as? [Any], pair.count == 2, let x = number(pair[0]), let y = number(pair[1]) {
+        if let pair = value as? [Any], pair.count == 2, let x = coordinate(pair[0]), let y = coordinate(pair[1]) {
             return CGPoint(x: x, y: y)
         }
         return nil
@@ -330,12 +353,13 @@ enum ComputerActions {
 
     private static func dragPath(_ dict: [String: Any]) -> [CGPoint]? {
         if let raw = dict["path"] as? [Any] {
+            guard (2...maxDragPoints).contains(raw.count) else { return nil }
             let points = raw.compactMap(pointValue)
             return points.count == raw.count ? points : nil
         }
         if let from = pointValue(dict["from"]), let to = pointValue(dict["to"]) { return [from, to] }
-        if let sx = number(dict["start_x"]), let sy = number(dict["start_y"]),
-           let ex = number(dict["end_x"]), let ey = number(dict["end_y"]) {
+        if let sx = coordinate(dict["start_x"]), let sy = coordinate(dict["start_y"]),
+           let ex = coordinate(dict["end_x"]), let ey = coordinate(dict["end_y"]) {
             return [CGPoint(x: sx, y: sy), CGPoint(x: ex, y: ey)]
         }
         return nil

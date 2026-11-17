@@ -67,6 +67,26 @@ final class ComputerUseTests: XCTestCase {
                        [.drag(path: [CGPoint(x: 1, y: 2), CGPoint(x: 3, y: 4)])])
     }
 
+    func testNumericBoundsAndInvalidValues() {
+        XCTAssertEqual(actions(["type": "move", "x": "1000000", "y": -1000000]), [.move(x: 1_000_000, y: -1_000_000)])
+        XCTAssertEqual(actions(["type": "click", "x": 1, "y": 2, "count": "1e300"]), [.click(x: 1, y: 2, button: .left, count: 3)])
+        XCTAssertEqual(actions(["type": "scroll", "x": 0, "y": 0, "dx": "10000", "dy": -10000]), [.scroll(x: 0, y: 0, dx: 10_000, dy: -10_000)])
+        XCTAssertEqual(actions(["type": "wait", "ms": "-100"]), [.wait(seconds: 0.1)])
+        for value in ["nan", "inf", "1e999", "1000001"] {
+            XCTAssertNotNil(failure(["type": "click", "x": value, "y": 0]))
+            XCTAssertNotNil(failure(["type": "drag", "path": [[0, 0], [value, 1]]]))
+        }
+        for value in ["nan", "inf", "1e999"] {
+            XCTAssertNotNil(failure(["type": "click", "x": 0, "y": 0, "count": value]))
+            XCTAssertNotNil(failure(["type": "wait", "seconds": value]))
+            XCTAssertNotNil(failure(["type": "wait", "duration_ms": value]))
+            XCTAssertNotNil(failure(["type": "scroll", "x": 0, "y": 0, "dy": value]))
+        }
+        XCTAssertNotNil(failure(["type": "scroll", "x": 0, "y": 0, "scroll_x": 10001]))
+        XCTAssertNotNil(failure(["type": "drag", "path": Array(repeating: [0, 0], count: 101)]))
+        XCTAssertEqual(ComputerActions.summary(of: ["type": "move", "x": "inf", "y": 0]), "")
+    }
+
     func testJSONStringTopLevelSingleAndEmpty() {
         XCTAssertEqual(actions("{\"actions\":[{\"type\":\"click\",\"x\":3,\"y\":4}]}"),
                        [.click(x: 3, y: 4, button: .left, count: 1)])

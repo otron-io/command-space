@@ -405,6 +405,7 @@ enum ComputerUseCLI {
         private let thread: AgentThread
         private let connection: ControlConnection
         private var observation: AnyCancellable?
+        private var busyObservation: AnyCancellable?
         private var scheduled = false
         private var started = false
         private var failed = false
@@ -429,6 +430,12 @@ enum ComputerUseCLI {
                 }
             }
             connection.send(["type": "status", "text": "Running in Command Space"])
+            // A fast turn can start and finish before the coalesced sync reads the thread.
+            busyObservation = thread.$isBusy.sink { [weak self] busy in
+                MainActor.assumeIsolated {
+                    if busy { self?.started = true }
+                }
+            }
             // objectWillChange fires before the change applies, so read on the next main-queue turn.
             observation = thread.objectWillChange.sink { [weak self] _ in
                 MainActor.assumeIsolated {
@@ -496,6 +503,7 @@ enum ComputerUseCLI {
             idleCheck?.cancel()
             idleCheck = nil
             observation = nil
+            busyObservation = nil
             connection.onClose = nil
             ThreadStream.active[id] = nil
         }
